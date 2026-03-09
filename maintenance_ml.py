@@ -35,7 +35,7 @@ MACHINES = {
 # Replace these with your actual Google Drive file IDs
 # =========================================================
 MODEL_FILE_IDS = {
-    "boiler": "1wegYDB9ZgDwx0_z7ckWRvxMiuiWUlbu",
+    "boiler": "1wegYDB9ZgDwx0_z7ckWRvxMiuiWUlbu-",
     "genset": "13gI10UvdCAAlMj3ePa7BwAQujpZ7k14H",
     "pellet": "1wZzZhsJsPMe92brSKa98Ah5z3edlv3ES",
 }
