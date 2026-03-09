@@ -4,8 +4,10 @@ import os
 import re
 import json
 import joblib
+import gdown
 import numpy as np
 import pandas as pd
+import streamlit as st
 from typing import Dict, Any, List, Tuple, Optional
 
 from sklearn.pipeline import Pipeline
@@ -17,14 +19,32 @@ from sklearn.impute import SimpleImputer
 # =========================
 # Config
 # =========================
-EXCEL_PATH = os.path.join("data", "QPLC-Maintenance Data.xlsx")
-MODEL_DIR = os.environ.get("MODEL_DIR", "./models_qplc")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+EXCEL_PATH = os.path.join(BASE_DIR, "data", "QPLC-Maintenance Data.xlsx")
+MODEL_DIR = os.environ.get("MODEL_DIR", os.path.join(BASE_DIR, "models_qplc"))
 os.makedirs(MODEL_DIR, exist_ok=True)
 
 MACHINES = {
     "boiler": {"sheet": "Boiler", "time_key": "DAY", "condition_col": "DAILY CONDITION"},
     "genset": {"sheet": "Gen Set", "time_key": "WEEK", "condition_col": "WEEKLY CONDITION"},
     "pellet": {"sheet": "Pellet Mill", "time_key": "DAY", "condition_col": "DAILY CONDITION"},
+}
+
+# =========================================================
+# Google Drive model file IDs
+# Replace these with your actual Google Drive file IDs
+# =========================================================
+MODEL_FILE_IDS = {
+    "boiler": "1wegYDB9ZgDwx0_z7ckWRvxMiuiWUlbu",
+    "genset": "13gI10UvdCAAlMj3ePa7BwAQujpZ7k14H",
+    "pellet": "1wZzZhsJsPMe92brSKa98Ah5z3edlv3ES",
+}
+
+MODEL_FILES = {
+    "boiler": "boiler_bundle.joblib",
+    "genset": "genset_bundle.joblib",
+    "pellet": "pellet_bundle.joblib",
 }
 
 
@@ -77,7 +97,7 @@ def parse_merged_header_sheet(xlsx_path: str, sheet: str) -> pd.DataFrame:
             col = "col"
         cols.append(col)
 
-    data = raw.iloc[header_idx + 2 :].copy()
+    data = raw.iloc[header_idx + 2:].copy()
     data.columns = _make_unique(cols)
     data = data.dropna(how="all").reset_index(drop=True)
     data = data.loc[:, [c for c in data.columns if c and c != "col"]]
@@ -274,16 +294,46 @@ def load_machine_df(machine: str) -> pd.DataFrame:
     return df
 
 
+# =========================
+# Model artifact helpers
+# =========================
 def artifact_path(machine: str) -> str:
-    return os.path.join(MODEL_DIR, f"{machine}_bundle.joblib")
+    return os.path.join(MODEL_DIR, MODEL_FILES[machine])
 
 
 def save_bundle(machine: str, bundle: Dict[str, Any]) -> None:
     joblib.dump(bundle, artifact_path(machine))
 
 
+def _download_from_gdrive(file_id: str, output_path: str) -> None:
+    url = f"https://drive.google.com/uc?id={file_id}"
+    gdown.download(url, output_path, quiet=False)
+
+
+def ensure_bundle_exists(machine: str) -> str:
+    if machine not in MODEL_FILES:
+        raise ValueError(f"Unknown machine: {machine}")
+
+    if machine not in MODEL_FILE_IDS:
+        raise ValueError(f"No Google Drive file ID configured for machine: {machine}")
+
+    output_path = artifact_path(machine)
+
+    if not os.path.exists(output_path):
+        file_id = MODEL_FILE_IDS[machine]
+        if not file_id or file_id.startswith("PASTE_YOUR_"):
+            raise ValueError(
+                f"Google Drive file ID for '{machine}' is not set. "
+                f"Please update MODEL_FILE_IDS in maintenance.py."
+            )
+        _download_from_gdrive(file_id, output_path)
+
+    return output_path
+
+
+@st.cache_resource
 def load_bundle(machine: str) -> Dict[str, Any]:
-    p = artifact_path(machine)
+    p = ensure_bundle_exists(machine)
     if not os.path.exists(p):
         return {}
     return joblib.load(p)
