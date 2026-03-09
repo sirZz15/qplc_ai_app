@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment
+venv/
+
+# Large ML models
+models_qplc/
+
+# Training results
+results/
