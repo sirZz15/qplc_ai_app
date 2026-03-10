@@ -2,4 +2,4 @@
 headless = true
 
 [theme]
-base = "dark"
+base = "light"
