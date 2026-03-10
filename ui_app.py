@@ -6,7 +6,30 @@ from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit as st
+import sys
+import platform
+import sklearn
+import pandas as pd
+import numpy as np
+import scipy
+import joblib
 
+st.sidebar.title("Deployment Environment")
+
+st.sidebar.write("### Python")
+st.sidebar.write(sys.version)
+
+st.sidebar.write("### Platform")
+st.sidebar.write(platform.platform())
+
+st.sidebar.write("### Libraries")
+st.sidebar.write("streamlit:", st.__version__)
+st.sidebar.write("scikit-learn:", sklearn.__version__)
+st.sidebar.write("pandas:", pd.__version__)
+st.sidebar.write("numpy:", np.__version__)
+st.sidebar.write("scipy:", scipy.__version__)
+st.sidebar.write("joblib:", joblib.__version__)
 from maintenance_ml import (
     load_bundle,
     load_machine_df,
