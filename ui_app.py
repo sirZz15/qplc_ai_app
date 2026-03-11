@@ -160,7 +160,7 @@ def is_numericish_column(col_name: str) -> bool:
 def is_dropdown_column(machine: str, col_name: str) -> bool:
     name = normalize_col_name(col_name)
 
-    if machine == "pellet" and "FEED TYPE" in name:
+    if machine == "pellet" and name == "FEED TYPE":
         return True
 
     if machine == "genset" and name == "REMARKS":
@@ -242,69 +242,65 @@ def infer_machine_group(machine: str, col_name: str) -> str:
         return "Other"
 
     if machine == "pellet":
-        if "STEAM" in c:
+        if "STEAM" in c or "US PRESS" in c or "DS PRESS" in c:
             return "Steam"
-        if "PELLET" in c or "MILL" in c or "FEED TYPE" in c:
+        if "PELLET" in c or "MILL" in c or "FEED TYPE" in c or "FEEDER RATE" in c or "TEMPERATURE" in c:
             return "Pellet Mill"
-        if "MOTOR" in c:
+        if "AMP1" in c or "AMP2" in c or "MOTOR" in c:
             return "Motor"
         if "OPERATING HOURS" in c or c.strip().upper() == "HOURS":
             return "Operation"
         return "Other"
 
-    return "Other"
-
 
 def sort_group_fields(machine: str, group: str, fields: List[str]) -> List[str]:
     if machine == "boiler" and group == "Boiler Unit":
-        preferred = [
-            "WATER",
-            "MAIN STREAM PRESSURE",
-            "FUEL GAS",
-        ]
+        preferred = ["WATER", "MAIN STREAM PRESSURE", "FUEL GAS"]
         return sorted(
             fields,
-            key=lambda x: next(
-                (i for i, p in enumerate(preferred) if p in x.upper()),
-                len(preferred)
-            )
+            key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
         )
 
     if machine == "boiler" and group == "Burner Unit":
-        preferred = [
-            "FUEL PRESSURE",
-        ]
+        preferred = ["FUEL PRESSURE"]
         return sorted(
             fields,
-            key=lambda x: next(
-                (i for i, p in enumerate(preferred) if p in x.upper()),
-                len(preferred)
-            )
+            key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
         )
 
     if machine == "boiler" and group == "Feed Water Tank":
-        preferred = [
-            "WATER",
-            "WATER TEMP",
-        ]
+        preferred = ["WATER", "WATER TEMP"]
         return sorted(
             fields,
-            key=lambda x: next(
-                (i for i, p in enumerate(preferred) if p in x.upper()),
-                len(preferred)
-            )
+            key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
         )
 
     if machine == "pellet" and group == "Pellet Mill":
-        preferred = [
-            "FEED TYPE",
-        ]
+        preferred = ["FEED TYPE", "FEEDER RATE", "TEMPERATURE"]
         return sorted(
             fields,
-            key=lambda x: next(
-                (i for i, p in enumerate(preferred) if p in x.upper()),
-                len(preferred)
-            )
+            key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
+        )
+
+    if machine == "pellet" and group == "Motor":
+        preferred = ["AMP1", "AMP2"]
+        return sorted(
+            fields,
+            key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
+        )
+
+    if machine == "pellet" and group == "Steam":
+        preferred = ["US PRESS", "DS PRESS"]
+        return sorted(
+            fields,
+            key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
+        )
+
+    if machine == "pellet" and group == "Operation":
+        preferred = ["HOURS", "OPERATING HOURS"]
+        return sorted(
+            fields,
+            key=lambda x: next((i for i, p in enumerate(preferred) if p == x.upper()), len(preferred))
         )
 
     return fields

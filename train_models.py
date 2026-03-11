@@ -91,6 +91,11 @@ def should_exclude_feature(machine: str, col_name: str) -> bool:
     if machine == "genset" and name == "REMARKS":
         return True
 
+    # Pellet-specific exclusions
+    if machine == "pellet":
+        if name == "OPERATING HOURS":
+            return True
+
     return False
 
 

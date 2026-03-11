@@ -157,6 +157,48 @@ def clean_numeric_series(series: pd.Series) -> pd.Series:
     s = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
     return pd.to_numeric(s, errors="coerce")
 
+def clean_pellet_rows(df: pd.DataFrame, cond_col: str) -> pd.DataFrame:
+    """
+    Remove pellet rows that are just non-operating placeholders:
+    HOURS = 0, sensors = 0/blank, DAILY CONDITION blank.
+    """
+    out = df.copy()
+
+    # Match actual pellet columns safely
+    hours_col = find_matching_column(out, "HOURS")
+    amp1_col = find_matching_column(out, "AMP1")
+    amp2_col = find_matching_column(out, "AMP2")
+    us_col = find_matching_column(out, "US PRESS")
+    ds_col = find_matching_column(out, "DS PRESS")
+    feeder_col = find_matching_column(out, "FEEDER RATE")
+    temp_col = find_matching_column(out, "TEMPERATURE")
+
+    sensor_cols = [c for c in [amp1_col, amp2_col, us_col, ds_col, feeder_col, temp_col] if c is not None]
+
+    if hours_col is None:
+        return out.reset_index(drop=True)
+
+    out[hours_col] = clean_numeric_series(out[hours_col]).fillna(0.0)
+
+    for c in sensor_cols:
+        out[c] = clean_numeric_series(out[c]).fillna(0.0)
+
+    out[cond_col] = out[cond_col].fillna("").astype(str).str.strip()
+
+    zero_mask = out[hours_col].eq(0)
+
+    if sensor_cols:
+        zero_sensor_mask = out[sensor_cols].sum(axis=1).eq(0)
+    else:
+        zero_sensor_mask = pd.Series(True, index=out.index)
+
+    blank_condition_mask = out[cond_col].eq("") | out[cond_col].eq("Normal")
+
+    # remove only clearly empty/non-operating rows
+    drop_mask = zero_mask & zero_sensor_mask & blank_condition_mask
+
+    out = out.loc[~drop_mask].copy().reset_index(drop=True)
+    return out
 
 # =========================
 # Label engineering
@@ -328,7 +370,7 @@ def add_history_features(
 # RUL target
 # =========================
 def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: str) -> pd.DataFrame:
-    out = df.copy()
+    out = df.copy().reset_index(drop=True)
 
     if time_key in out.columns:
         out[time_key] = pd.to_numeric(out[time_key], errors="coerce").ffill()
@@ -337,15 +379,21 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
 
     out[cond_col] = out[cond_col].apply(normalize_condition_text)
 
-    if machine == "pellet" and "HOURS" in out.columns:
-        hrs = clean_numeric_series(out["HOURS"]).fillna(0.0)
+    # Pellet uses row-level HOURS
+    if machine == "pellet":
+        hours_col = find_matching_column(out, "HOURS")
+        if hours_col is not None:
+            hrs = clean_numeric_series(out[hours_col]).fillna(0.0)
+        else:
+            hrs = pd.Series(np.ones(len(out)), index=out.index)
+
+    # Boiler/genset use operating hours if available
     elif "OPERATING HOURS" in out.columns:
         hrs = clean_numeric_series(out["OPERATING HOURS"]).fillna(0.0)
     else:
         hrs = pd.Series(np.ones(len(out)), index=out.index)
 
     out["_hrs"] = hrs.clip(lower=0.0)
-    out = out.sort_values(by=time_key).reset_index(drop=True)
     out["_cum_hours"] = out["_hrs"].cumsum()
 
     fault_type = out[cond_col].apply(extract_fault_type)
@@ -353,6 +401,7 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
 
     next_fault_cum = np.full(len(out), np.nan)
     next_idx = None
+
     for i in range(len(out) - 1, -1, -1):
         if out.loc[i, "_is_fault"] == 1:
             next_idx = i
@@ -360,9 +409,10 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
             next_fault_cum[i] = out.loc[next_idx, "_cum_hours"]
 
     out["rul_hours"] = next_fault_cum - out["_cum_hours"]
+    out.loc[out["_is_fault"] == 1, "rul_hours"] = 0.0
     out.loc[out["rul_hours"] < 0, "rul_hours"] = np.nan
-    return out
 
+    return out
 
 # =========================
 # Preprocessing
@@ -425,13 +475,26 @@ def load_machine_df(machine: str) -> pd.DataFrame:
     df["fault_type"] = df[cond_col].apply(extract_fault_type)
     df["fault_flag"] = df["fault_type"].apply(fault_flag_from_type)
 
+    # Convert likely numeric columns
+    protected_cols = {cond_col, "condition_severity", "fault_type", "fault_flag"}
     for c in df.columns:
-        if c not in [cond_col, "condition_severity", "fault_type", "fault_flag"]:
-            s_num = clean_numeric_series(df[c])
-            if s_num.notna().mean() >= 0.70:
-                df[c] = s_num
+        if c in protected_cols:
+            continue
 
-    return df
+        # Keep pellet FEED TYPE as categorical
+        if machine == "pellet" and normalize_col_name(c) == "FEED TYPE":
+            df[c] = df[c].astype(str).replace({"nan": np.nan}).str.strip()
+            continue
+
+        s_num = clean_numeric_series(df[c])
+        if s_num.notna().mean() >= 0.70:
+            df[c] = s_num
+
+    # Pellet-specific cleaning
+    if machine == "pellet":
+        df = clean_pellet_rows(df, cond_col)
+
+    return df.reset_index(drop=True)
 
 
 def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
@@ -446,6 +509,15 @@ def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
     for c in df.columns:
         if c in reserved:
             continue
+
+        # Pellet: keep FEED TYPE categorical
+        if machine == "pellet" and normalize_col_name(c) == "FEED TYPE":
+            continue
+
+        # Pellet: exclude repeated daily OPERATING HOURS as ML feature
+        if machine == "pellet" and normalize_col_name(c) == "OPERATING HOURS":
+            continue
+
         s_num = clean_numeric_series(df[c])
         if s_num.notna().sum() > 0:
             df[c] = s_num
@@ -455,7 +527,6 @@ def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
         df = add_history_features(df, numeric_candidate_cols, history_steps=history_steps)
 
     return df
-
 
 # =========================
 # Model artifact helpers
