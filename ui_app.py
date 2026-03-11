@@ -343,13 +343,17 @@ if not bundle:
     st.stop()
 
 cfg = MACHINES[machine]
-history_steps = 4 if cfg["use_history"] else 1
 
-if cfg["use_history"]:
-    history_steps = st.sidebar.slider("Number of input days/steps", min_value=3, max_value=6, value=4, step=1)
+# Fixed input window:
+# - Boiler and Pellet: 2 past days + current day = 3 rows
+# - Genset: current day only = 1 row
+history_steps = 3 if cfg["use_history"] else 1
 
 st.sidebar.markdown("---")
-st.sidebar.caption("Boiler and Pellet require past values. Genset uses current values only.")
+if cfg["use_history"]:
+    st.sidebar.caption("Boiler and Pellet use 3 input sets: Day -2, Day -1, and Current Day.")
+else:
+    st.sidebar.caption("Genset uses current values only.")
 
 # =========================================================
 # Reference
