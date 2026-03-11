@@ -151,9 +151,22 @@ def is_numericish_column(col_name: str) -> bool:
     numeric_keywords = [
         "OPERATING HOURS", "HOURS", "RUNNING HOURS", "RUNTIME", "LOAD",
         "TEMP", "TEMPERATURE", "PRESSURE", "CURRENT", "VOLTAGE",
-        "SPEED", "RPM", "FLOW", "LEVEL", "AMPS", "KW", "KVA", "HZ", "PF", "WATER", "FUEL"
+        "SPEED", "RPM", "FLOW", "LEVEL", "AMPS", "KW", "KVA", "HZ", "PF",
+        "WATER", "FUEL"
     ]
     return any(keyword in name for keyword in numeric_keywords)
+
+
+def is_dropdown_column(machine: str, col_name: str) -> bool:
+    name = normalize_col_name(col_name)
+
+    if machine == "pellet" and "FEED TYPE" in name:
+        return True
+
+    if machine == "genset" and name == "REMARKS":
+        return True
+
+    return False
 
 
 def badge_class(condition: str) -> str:
@@ -191,19 +204,15 @@ def infer_machine_group(machine: str, col_name: str) -> str:
     c = str(col_name).upper()
 
     if machine == "boiler":
-        # Feed Water Tank first
         if "840" in c or "WATER TEMP" in c or "FEED WATER TANK" in c:
             return "Feed Water Tank"
 
-        # Operation
         if "OPERATING HOURS" in c:
             return "Operation"
 
-        # Burner Unit: only fuel pressure
         if "FUEL PRESSURE" in c or "BURNER UNIT" in c:
             return "Burner Unit"
 
-        # Boiler Unit: water level, main steam pressure, fuel gas
         if "MAIN STREAM PRESSURE" in c:
             return "Boiler Unit"
         if "FUEL GAS" in c:
@@ -235,7 +244,7 @@ def infer_machine_group(machine: str, col_name: str) -> str:
     if machine == "pellet":
         if "STEAM" in c:
             return "Steam"
-        if "PELLET" in c or "MILL" in c:
+        if "PELLET" in c or "MILL" in c or "FEED TYPE" in c:
             return "Pellet Mill"
         if "MOTOR" in c:
             return "Motor"
@@ -246,22 +255,94 @@ def infer_machine_group(machine: str, col_name: str) -> str:
     return "Other"
 
 
+def sort_group_fields(machine: str, group: str, fields: List[str]) -> List[str]:
+    if machine == "boiler" and group == "Boiler Unit":
+        preferred = [
+            "WATER",
+            "MAIN STREAM PRESSURE",
+            "FUEL GAS",
+        ]
+        return sorted(
+            fields,
+            key=lambda x: next(
+                (i for i, p in enumerate(preferred) if p in x.upper()),
+                len(preferred)
+            )
+        )
+
+    if machine == "boiler" and group == "Burner Unit":
+        preferred = [
+            "FUEL PRESSURE",
+        ]
+        return sorted(
+            fields,
+            key=lambda x: next(
+                (i for i, p in enumerate(preferred) if p in x.upper()),
+                len(preferred)
+            )
+        )
+
+    if machine == "boiler" and group == "Feed Water Tank":
+        preferred = [
+            "WATER",
+            "WATER TEMP",
+        ]
+        return sorted(
+            fields,
+            key=lambda x: next(
+                (i for i, p in enumerate(preferred) if p in x.upper()),
+                len(preferred)
+            )
+        )
+
+    if machine == "pellet" and group == "Pellet Mill":
+        preferred = [
+            "FEED TYPE",
+        ]
+        return sorted(
+            fields,
+            key=lambda x: next(
+                (i for i, p in enumerate(preferred) if p in x.upper()),
+                len(preferred)
+            )
+        )
+
+    return fields
+
+
+def get_dropdown_options(df_ref: pd.DataFrame, field: str) -> List[str]:
+    if field not in df_ref.columns:
+        return [""]
+
+    vals = (
+        df_ref[field]
+        .dropna()
+        .astype(str)
+        .str.strip()
+    )
+    vals = vals[vals != ""].unique().tolist()
+    vals = sorted(vals)
+
+    if not vals:
+        vals = [""]
+
+    return vals
+
+
 def build_grouped_input_form(
     machine: str,
     base_fields: List[str],
     history_steps: int,
+    df_ref: pd.DataFrame,
 ) -> List[Dict[str, Any]]:
     rows = []
-    labels = []
 
     if history_steps == 1:
-        labels = ["Current"]
+        labels = ["Current Day"]
+    elif history_steps == 3:
+        labels = ["Day -2", "Day -1", "Current Day"]
     else:
-        for i in range(history_steps):
-            if i < history_steps - 1:
-                labels.append(f"Past Step {i + 1}")
-            else:
-                labels.append("Current")
+        labels = [f"Step {i + 1}" for i in range(history_steps - 1)] + ["Current Day"]
 
     for row_idx in range(history_steps):
         row_inputs: Dict[str, Any] = {}
@@ -285,10 +366,22 @@ def build_grouped_input_form(
                 st.markdown(f"**{group}**")
                 c1, c2 = st.columns(2, gap="large")
 
-                for i, field in enumerate(groups[group]):
+                group_fields = sort_group_fields(machine, group, groups[group])
+
+                for i, field in enumerate(group_fields):
                     target_col = c1 if i % 2 == 0 else c2
                     with target_col:
-                        if is_numericish_column(field):
+                        if is_dropdown_column(machine, field):
+                            options = get_dropdown_options(df_ref, field)
+                            val = st.selectbox(
+                                field,
+                                options=options,
+                                index=0,
+                                key=f"{machine}_{row_idx}_{field}",
+                            )
+                            row_inputs[field] = val
+
+                        elif is_numericish_column(field):
                             val = st.number_input(
                                 label=field,
                                 value=0.0,
@@ -297,12 +390,14 @@ def build_grouped_input_form(
                                 key=f"{machine}_{row_idx}_{field}",
                             )
                             row_inputs[field] = val
+
                         else:
                             row_inputs[field] = st.text_input(
                                 field,
                                 value="",
                                 key=f"{machine}_{row_idx}_{field}",
                             )
+
                 st.markdown('<hr class="soft">', unsafe_allow_html=True)
 
         rows.append(row_inputs)
@@ -421,12 +516,12 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("🔎 Input Machine Features")
 
 if machine in ["boiler", "pellet"]:
-    st.caption("Enter past values in order. The last row is the current/latest reading.")
+    st.caption("Enter exactly 3 sets of values in order: Day -2, Day -1, and Current Day.")
 else:
     st.caption("Enter the current/latest values only.")
 
 with st.form("prediction_form"):
-    input_rows = build_grouped_input_form(machine, base_fields, history_steps)
+    input_rows = build_grouped_input_form(machine, base_fields, history_steps, df_ref)
     predict_btn = st.form_submit_button("🚀 Predict Machine Status", use_container_width=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
@@ -504,8 +599,13 @@ if predict_btn:
             )
 
         with k3:
-            value_text = "N/A" if days_before_fault is None else f"{days_before_fault:,.2f} days"
-            meta_text = "Applicable only to Boiler and Pellet" if days_before_fault is None else f"RUL model: {rul_model_name}"
+            if final_condition == "Fault":
+                value_text = "N/A"
+                meta_text = "Machine already in Fault state"
+            else:
+                value_text = "N/A" if days_before_fault is None else f"{days_before_fault:,.2f} days"
+                meta_text = "Applicable only to Boiler and Pellet" if days_before_fault is None else f"RUL model: {rul_model_name}"
+
             render_metric_card(
                 "Days Before Fault",
                 value_text,
