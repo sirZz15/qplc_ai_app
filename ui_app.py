@@ -191,14 +191,28 @@ def infer_machine_group(machine: str, col_name: str) -> str:
     c = str(col_name).upper()
 
     if machine == "boiler":
-        if "MAIN STREAM PRESSURE" in c or ("WATER" in c and "840" not in c):
-            return "Boiler Unit"
-        if "FUEL GAS" in c or "FUEL PRESSURE" in c:
-            return "Burner Unit"
-        if "840" in c or "WATER TEMP" in c:
+        # Feed Water Tank first
+        if "840" in c or "WATER TEMP" in c or "FEED WATER TANK" in c:
             return "Feed Water Tank"
+
+        # Operation
         if "OPERATING HOURS" in c:
             return "Operation"
+
+        # Burner Unit: only fuel pressure
+        if "FUEL PRESSURE" in c or "BURNER UNIT" in c:
+            return "Burner Unit"
+
+        # Boiler Unit: water level, main steam pressure, fuel gas
+        if "MAIN STREAM PRESSURE" in c:
+            return "Boiler Unit"
+        if "FUEL GAS" in c:
+            return "Boiler Unit"
+        if "BOILER UNIT" in c:
+            return "Boiler Unit"
+        if "WATER" in c and "TEMP" not in c and "840" not in c and "FEED WATER TANK" not in c:
+            return "Boiler Unit"
+
         return "Other"
 
     if machine == "genset":
