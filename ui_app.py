@@ -6,13 +6,15 @@ from typing import Dict, Any, List
 import numpy as np
 import pandas as pd
 import streamlit as st
-import streamlit as st
-
 
 from maintenance_ml import (
+    MACHINES,
     load_bundle,
     load_machine_df,
     suggest_fix,
+    build_history_input_frame,
+    infer_boiler_fault_type_rules,
+    infer_genset_fault_type_rules,
 )
 
 st.set_page_config(
@@ -31,7 +33,6 @@ st.markdown("""
     padding-bottom: 1rem;
     max-width: 1450px;
 }
-
 .big-title {
     font-size: 2.3rem;
     font-weight: 800;
@@ -42,14 +43,12 @@ st.markdown("""
     color: #F8FAFC;
     text-shadow: 0 2px 8px rgba(0,0,0,0.35);
 }
-
 .subtle {
     color: rgba(255,255,255,0.92);
     font-size: 1rem;
     margin-bottom: 1rem;
     text-shadow: 0 1px 6px rgba(0,0,0,0.28);
 }
-
 .hero {
     border-radius: 22px;
     padding: 1.3rem 1.5rem;
@@ -58,7 +57,6 @@ st.markdown("""
     box-shadow: 0 12px 32px rgba(0,0,0,0.22);
     margin-bottom: 1rem;
 }
-
 .card {
     border-radius: 18px;
     padding: 18px 18px;
@@ -66,7 +64,6 @@ st.markdown("""
     border: 1px solid rgba(255,255,255,0.08);
     box-shadow: 0 10px 30px rgba(0,0,0,0.18);
 }
-
 .kpi-card {
     border-radius: 18px;
     padding: 16px 16px;
@@ -75,25 +72,21 @@ st.markdown("""
     box-shadow: 0 10px 24px rgba(0,0,0,0.16);
     min-height: 140px;
 }
-
 .kpi-label {
     font-size: 0.92rem;
     color: rgba(255,255,255,0.78);
     margin-bottom: 0.35rem;
 }
-
 .kpi-value {
     font-size: 1.35rem;
     font-weight: 800;
     margin-bottom: 0.45rem;
     color: #FFFFFF;
 }
-
 .kpi-meta {
     font-size: 0.85rem;
     color: rgba(255,255,255,0.72);
 }
-
 .badge {
     display:inline-block;
     padding: 7px 12px;
@@ -102,38 +95,31 @@ st.markdown("""
     font-size: 0.90rem;
     border: 1px solid rgba(255,255,255,0.12);
 }
-
 .badge-ok { background: rgba(46, 204, 113, 0.18); }
 .badge-mid { background: rgba(241, 196, 15, 0.18); }
 .badge-bad { background: rgba(231, 76, 60, 0.18); }
-
 .small-note {
     font-size: 0.86rem;
     color: rgba(255,255,255,0.80);
 }
-
 .section-title {
     font-size: 1.1rem;
     font-weight: 700;
     margin-bottom: 0.3rem;
     color: #F8FAFC;
 }
-
 hr.soft {
     border: none;
     height: 1px;
     background: rgba(255,255,255,0.08);
     margin: 0.8rem 0 1rem 0;
 }
-
 [data-testid="stSidebar"] {
     border-right: 1px solid rgba(255,255,255,0.06);
 }
-
 .stNumberInput input {
     text-align: left;
 }
-
 .stDataFrame, .stTable {
     border-radius: 12px;
     overflow: hidden;
@@ -144,12 +130,6 @@ hr.soft {
 # =========================================================
 # Helpers
 # =========================================================
-TIME_LIKE_COLS = {
-    "DAY", "WEEK", "DATE", "TIME", "TIMESTAMP", "DATETIME",
-    "DAILY CONDITION", "DAILY CONDITION_1"
-}
-
-
 def normalize_col_name(col_name: str) -> str:
     name = str(col_name).strip().upper()
     name = re.sub(r"__\d+$", "", name)
@@ -158,55 +138,28 @@ def normalize_col_name(col_name: str) -> str:
 
 def is_time_like_column(col_name: str) -> bool:
     name = normalize_col_name(col_name)
-
-    # Explicit exclusions
-    if name in TIME_LIKE_COLS:
+    if name in {"DAY", "WEEK", "DATE", "TIME", "TIMESTAMP", "DATETIME", "DAILY CONDITION", "WEEKLY CONDITION"}:
         return True
-
-    # Exclude daily tracking / daily condition fields
-    if name.startswith("DAILY CONDITION"):
+    if name.startswith("DAILY CONDITION") or name.startswith("WEEKLY CONDITION"):
         return True
-
     prefixes = ("DAY", "WEEK", "DATE", "TIME", "TIMESTAMP", "DATETIME")
     return any(name.startswith(prefix) for prefix in prefixes)
 
 
-def is_forced_numeric_column(col_name: str) -> bool:
+def is_numericish_column(col_name: str) -> bool:
     name = normalize_col_name(col_name)
-
     numeric_keywords = [
-        "OPERATING HOURS",
-        "HOURS",
-        "RUNNING HOURS",
-        "RUNTIME",
-        "LOAD",
-        "TEMP",
-        "TEMPERATURE",
-        "PRESSURE",
-        "CURRENT",
-        "VOLTAGE",
-        "SPEED",
-        "RPM",
-        "FLOW",
-        "LEVEL",
-        "AMPS",
-        "KW",
-        "KVA",
-        "HZ",
-        "PF",
+        "OPERATING HOURS", "HOURS", "RUNNING HOURS", "RUNTIME", "LOAD",
+        "TEMP", "TEMPERATURE", "PRESSURE", "CURRENT", "VOLTAGE",
+        "SPEED", "RPM", "FLOW", "LEVEL", "AMPS", "KW", "KVA", "HZ", "PF", "WATER", "FUEL"
     ]
-
-    return any(keyword in name for keyword in numeric_keywords) or name == "HOURS"
-
-
-def clean_display_columns(cols: List[str]) -> List[str]:
-    return [c for c in cols if not is_time_like_column(c)]
+    return any(keyword in name for keyword in numeric_keywords)
 
 
-def badge_class(sev: str) -> str:
-    if sev == "Non-Critical":
+def badge_class(condition: str) -> str:
+    if condition == "Normal":
         return "badge badge-ok"
-    if sev == "Inconvenient":
+    if condition == "Trending to Fault":
         return "badge badge-mid"
     return "badge badge-bad"
 
@@ -224,15 +177,25 @@ def render_metric_card(label: str, value_html: str, meta: str):
     )
 
 
+def get_display_base_fields(feature_cols: List[str]) -> List[str]:
+    base_fields = []
+    for c in feature_cols:
+        base = re.sub(r"__(lag|diff)\d+$", "", str(c))
+        base = base.replace("__rollmean3", "").replace("__rollstd3", "")
+        if base not in base_fields and not is_time_like_column(base):
+            base_fields.append(base)
+    return base_fields
+
+
 def infer_machine_group(machine: str, col_name: str) -> str:
     c = str(col_name).upper()
 
     if machine == "boiler":
-        if "BOILER UNIT" in c:
+        if "MAIN STREAM PRESSURE" in c or ("WATER" in c and "840" not in c):
             return "Boiler Unit"
-        if "BURNER UNIT" in c:
+        if "FUEL GAS" in c or "FUEL PRESSURE" in c:
             return "Burner Unit"
-        if "FEED WATER TANK" in c:
+        if "840" in c or "WATER TEMP" in c:
             return "Feed Water Tank"
         if "OPERATING HOURS" in c:
             return "Operation"
@@ -247,7 +210,7 @@ def infer_machine_group(machine: str, col_name: str) -> str:
             return "Load"
         if "POWER FACTOR" in c:
             return "Power Factor"
-        if "ENGINE" in c:
+        if "ENGINE" in c or "OIL" in c or "COOLANT" in c or "FREQUENCY" in c:
             return "Engine"
         if "OPERATING HOURS" in c:
             return "Operation"
@@ -269,57 +232,83 @@ def infer_machine_group(machine: str, col_name: str) -> str:
     return "Other"
 
 
-def build_grouped_input_form(df_ref: pd.DataFrame, machine: str, cols: List[str]) -> Dict[str, Any]:
-    inputs: Dict[str, Any] = {}
-    cols = clean_display_columns(cols)
+def build_grouped_input_form(
+    machine: str,
+    base_fields: List[str],
+    history_steps: int,
+) -> List[Dict[str, Any]]:
+    rows = []
+    labels = []
 
-    groups: Dict[str, List[str]] = {}
-    for c in cols:
-        g = infer_machine_group(machine, c)
-        groups.setdefault(g, []).append(c)
+    if history_steps == 1:
+        labels = ["Current"]
+    else:
+        for i in range(history_steps):
+            if i < history_steps - 1:
+                labels.append(f"Past Step {i + 1}")
+            else:
+                labels.append("Current")
 
-    preferred_order = [
-        "Boiler Unit", "Burner Unit", "Feed Water Tank",
-        "Voltage", "Current", "Load", "Power Factor", "Engine",
-        "Steam", "Pellet Mill", "Motor",
-        "Operation", "Remarks", "Other"
-    ]
-    ordered_groups = [g for g in preferred_order if g in groups] + [g for g in groups if g not in preferred_order]
+    for row_idx in range(history_steps):
+        row_inputs: Dict[str, Any] = {}
 
-    for group in ordered_groups:
-        st.markdown(f"**{group}**")
-        col1, col2 = st.columns(2, gap="large")
-        group_cols = groups[group]
+        with st.expander(labels[row_idx], expanded=(row_idx == history_steps - 1)):
+            groups: Dict[str, List[str]] = {}
+            for c in base_fields:
+                g = infer_machine_group(machine, c)
+                groups.setdefault(g, []).append(c)
 
-        for i, c in enumerate(group_cols):
-            target_col = col1 if i % 2 == 0 else col2
-            with target_col:
-                s = df_ref[c] if c in df_ref.columns else pd.Series(dtype="object")
+            ordered_groups = [
+                g for g in [
+                    "Boiler Unit", "Burner Unit", "Feed Water Tank",
+                    "Voltage", "Current", "Load", "Power Factor", "Engine",
+                    "Steam", "Pellet Mill", "Motor",
+                    "Operation", "Remarks", "Other"
+                ] if g in groups
+            ]
 
-                s_num = pd.to_numeric(s, errors="coerce")
-                numeric_ratio = s_num.notna().mean() if len(s) else 0.0
+            for group in ordered_groups:
+                st.markdown(f"**{group}**")
+                c1, c2 = st.columns(2, gap="large")
 
-                # Force numeric input for operating hours and similar numeric fields
-                if is_forced_numeric_column(c) or pd.api.types.is_numeric_dtype(s) or numeric_ratio >= 0.50:
-                    default_val = float(np.nanmedian(s_num.values)) if s_num.notna().any() else 0.0
-                    val = st.number_input(
-                        label=c,
-                        value=default_val,
-                        step=0.1,
-                        format="%.4f",
-                        key=f"grouped_{c}",
-                    )
-                    inputs[c] = val
-                else:
-                    uniq = s.dropna().astype(str).str.strip()
-                    uniq = uniq[uniq != ""]
-                    options = ["(blank)"] + uniq.value_counts().head(15).index.tolist()
-                    sel = st.selectbox(c, options, key=f"grouped_{c}")
-                    inputs[c] = "" if sel == "(blank)" else sel
+                for i, field in enumerate(groups[group]):
+                    target_col = c1 if i % 2 == 0 else c2
+                    with target_col:
+                        if is_numericish_column(field):
+                            val = st.number_input(
+                                label=field,
+                                value=0.0,
+                                step=0.01,
+                                format="%.4f",
+                                key=f"{machine}_{row_idx}_{field}",
+                            )
+                            row_inputs[field] = val
+                        else:
+                            row_inputs[field] = st.text_input(
+                                field,
+                                value="",
+                                key=f"{machine}_{row_idx}_{field}",
+                            )
+                st.markdown('<hr class="soft">', unsafe_allow_html=True)
 
-        st.markdown('<hr class="soft">', unsafe_allow_html=True)
+        rows.append(row_inputs)
 
-    return inputs
+    return rows
+
+
+def get_best_pipe(bundle: Dict[str, Any], section: str):
+    best_name = bundle[section]["best_model"]
+    if best_name is None:
+        return None, None
+    return best_name, bundle[section]["pipelines"][best_name]
+
+
+def final_machine_condition(sev_pred: str, ff_pred: str) -> str:
+    if sev_pred == "Fault" or ff_pred == "Fault":
+        return "Fault"
+    if sev_pred == "Trend":
+        return "Trending to Fault"
+    return "Normal"
 
 
 # =========================================================
@@ -330,8 +319,7 @@ st.markdown(
     <div class="hero">
         <div class="big-title">🛠️ QPLC AI Predictive Maintenance Dashboard</div>
         <div class="subtle">
-            Input machine readings to predict machine condition, fault status,
-            fault type, remaining useful life, and recommended corrective action.
+            Predict machine condition, fault type, and days before fault.
         </div>
     </div>
     """,
@@ -354,20 +342,25 @@ if not bundle:
     st.sidebar.error("No trained models found. Run: python train_models.py")
     st.stop()
 
-raw_feature_cols = bundle["feature_columns"]
-feature_cols = [c for c in raw_feature_cols if not is_time_like_column(c)]
+cfg = MACHINES[machine]
+history_steps = 4 if cfg["use_history"] else 1
 
-use_rul = st.sidebar.checkbox("Predict Lifespan (RUL) if available", value=True)
-group_inputs = st.sidebar.checkbox("Group inputs by subsystem", value=True)
+if cfg["use_history"]:
+    history_steps = st.sidebar.slider("Number of input days/steps", min_value=3, max_value=6, value=4, step=1)
 
 st.sidebar.markdown("---")
-st.sidebar.caption("This app is configured for prediction only.")
+st.sidebar.caption("Boiler and Pellet require past values. Genset uses current values only.")
 
 # =========================================================
-# Top summary cards
+# Reference
 # =========================================================
 df_ref = load_machine_df(machine)
+feature_cols = bundle["feature_columns"]
+base_fields = get_display_base_fields(feature_cols)
 
+# =========================================================
+# Top summary
+# =========================================================
 ctop1, ctop2, ctop3 = st.columns([1.15, 1.15, 1], gap="large")
 with ctop1:
     st.markdown(
@@ -383,8 +376,8 @@ with ctop2:
     st.markdown(
         f"""
         <div class="card">
-            <div class="section-title">Input Fields Used</div>
-            <div class="small-note">{len(feature_cols)} predictive features</div>
+            <div class="section-title">Base Input Fields</div>
+            <div class="small-note">{len(base_fields)} user-entered fields</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -408,121 +401,121 @@ st.write("")
 # =========================================================
 st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("🔎 Input Machine Features")
-st.caption("Time-index fields such as DAY, DAY__1, WEEK, DAILY CONDITION, and similar columns are excluded from the form.")
+
+if machine in ["boiler", "pellet"]:
+    st.caption("Enter past values in order. The last row is the current/latest reading.")
+else:
+    st.caption("Enter the current/latest values only.")
 
 with st.expander("Show / Hide Input Form", expanded=True):
-    inputs = build_grouped_input_form(df_ref, machine, feature_cols)
+    with st.form("prediction_form"):
+        input_rows = build_grouped_input_form(machine, base_fields, history_steps)
+        predict_btn = st.form_submit_button("🚀 Predict Machine Status", use_container_width=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
-
-st.write("")
-predict_btn = st.button("🚀 Predict Machine Status", use_container_width=True)
 
 # =========================================================
 # Prediction
 # =========================================================
 if predict_btn:
-    X = pd.DataFrame([{
-        c: inputs.get(c, np.nan) if not is_time_like_column(c) else np.nan
-        for c in raw_feature_cols
-    }])
+    try:
+        X = build_history_input_frame(machine, input_rows, bundle)
 
-    sev_name = bundle["severity"]["best_model"]
-    ff_name = bundle["fault_flag"]["best_model"]
+        sev_name, sev_pipe = get_best_pipe(bundle, "severity")
+        ff_name, ff_pipe = get_best_pipe(bundle, "fault_flag")
 
-    sev_pipe = bundle["severity"]["pipelines"][sev_name]
-    ff_pipe = bundle["fault_flag"]["pipelines"][ff_name]
+        sev_pred = str(sev_pipe.predict(X)[0])
+        ff_pred = str(ff_pipe.predict(X)[0])
 
-    sev_pred = str(sev_pipe.predict(X)[0])
-    ff_pred = str(ff_pipe.predict(X)[0])
+        final_condition = final_machine_condition(sev_pred, ff_pred)
 
-    fault_type_pred = "Normal"
-    fault_type_model_name = "N/A"
+        fault_type_pred = "N/A"
+        fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "N/A"
 
-    if ff_pred == "Fault":
-        if bundle["fault_type"]["pipelines"]:
-            best_ft = bundle["fault_type"]["best_model"]
-            if best_ft:
-                ft_pipe = bundle["fault_type"]["pipelines"][best_ft]
-                fault_type_model_name = best_ft
-                fault_type_pred = str(ft_pipe.predict(X)[0])
-            else:
-                fault_type_pred = "Fault (unspecified)"
-        else:
-            fault_type_pred = "Fault (unspecified)"
+        if final_condition != "Normal":
+            if machine == "boiler":
+                ft = infer_boiler_fault_type_rules(input_rows)
+                fault_type_pred = ft if ft else "N/A"
 
-    rul_hours = None
-    rul_model_name = "N/A"
+            elif machine == "genset":
+                ft = infer_genset_fault_type_rules(input_rows[-1])
+                fault_type_pred = ft if ft else "N/A"
 
-    if use_rul and bundle.get("rul"):
-        try:
-            best_rul = bundle["rul"]["best_model"]
-            rul_model_name = best_rul
-            rul_pipe = bundle["rul"]["pipelines"][best_rul]
-            val = float(rul_pipe.predict(X)[0])
-            if np.isfinite(val) and val >= 0:
-                rul_hours = val
-        except Exception:
-            rul_hours = None
+            elif machine == "pellet":
+                if bundle["fault_type"]["pipelines"] and bundle["fault_type"]["best_model"]:
+                    best_ft = bundle["fault_type"]["best_model"]
+                    ft_pipe = bundle["fault_type"]["pipelines"][best_ft]
+                    fault_type_model_name = best_ft
+                    fault_type_pred = str(ft_pipe.predict(X)[0])
+                else:
+                    fault_type_pred = "N/A"
 
-    fixes = suggest_fix(machine, fault_type_pred)
+        days_before_fault = None
+        rul_model_name = "N/A"
 
-    st.write("")
-    k1, k2, k3, k4 = st.columns(4, gap="large")
+        if cfg["rul_enabled"] and bundle.get("rul"):
+            try:
+                best_rul = bundle["rul"]["best_model"]
+                rul_model_name = best_rul
+                rul_pipe = bundle["rul"]["pipelines"][best_rul]
+                val_hours = float(rul_pipe.predict(X)[0])
+                if np.isfinite(val_hours) and val_hours >= 0:
+                    days_before_fault = val_hours / 24.0
+            except Exception:
+                days_before_fault = None
 
-    with k1:
-        render_metric_card(
-            "Machine Condition",
-            f'<span class="{badge_class(sev_pred)}">{sev_pred}</span>',
-            f"Model used: {sev_name}",
-        )
+        fixes = suggest_fix(machine, fault_type_pred)
 
-    with k2:
-        ff_badge = "badge badge-ok" if ff_pred == "Normal" else "badge badge-bad"
-        render_metric_card(
-            "Machine Fault",
-            f'<span class="{ff_badge}">{ff_pred}</span>',
-            f"Model used: {ff_name}",
-        )
+        st.write("")
+        k1, k2, k3 = st.columns(3, gap="large")
 
-    with k3:
-        render_metric_card(
-            "Possible Fault",
-            fault_type_pred,
-            f"Model used: {fault_type_model_name}",
-        )
+        with k1:
+            render_metric_card(
+                "Machine Condition",
+                f'<span class="{badge_class(final_condition)}">{final_condition}</span>',
+                f"Severity model: {sev_name} | Fault flag model: {ff_name}",
+            )
 
-    with k4:
-        rul_text = "N/A" if rul_hours is None else f"{rul_hours:,.2f} hours"
-        rul_meta = "Not trained or insufficient fault history" if rul_hours is None else f"Model used: {rul_model_name}"
-        render_metric_card(
-            "Estimated Lifespan (RUL)",
-            rul_text,
-            rul_meta,
-        )
+        with k2:
+            render_metric_card(
+                "Fault Type",
+                fault_type_pred,
+                f"Method: {fault_type_model_name}",
+            )
 
-    st.write("")
-    lower1, lower2 = st.columns([1.25, 1], gap="large")
+        with k3:
+            value_text = "N/A" if days_before_fault is None else f"{days_before_fault:,.2f} days"
+            meta_text = "Applicable only to Boiler and Pellet" if days_before_fault is None else f"RUL model: {rul_model_name}"
+            render_metric_card(
+                "Days Before Fault",
+                value_text,
+                meta_text,
+            )
 
-    with lower1:
+        st.write("")
+        lower1, lower2 = st.columns([1.25, 1], gap="large")
+
+        with lower1:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.subheader("🧰 Suggested Fix / Recommended Actions")
+            for i, line in enumerate(fixes, 1):
+                st.write(f"{i}. {line}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        with lower2:
+            st.markdown('<div class="card">', unsafe_allow_html=True)
+            st.subheader("📌 Prediction Summary")
+            st.write(f"**Machine:** {machine.upper()}")
+            st.write(f"**Machine Condition:** {final_condition}")
+            st.write(f"**Fault Type:** {fault_type_pred}")
+            st.write(f"**Days Before Fault:** {'N/A' if days_before_fault is None else f'{days_before_fault:,.2f} days'}")
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        st.write("")
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("🧰 Suggested Fix / Recommended Actions")
-        for i, line in enumerate(fixes, 1):
-            st.write(f"{i}. {line}")
+        st.subheader("📋 Model Input Used")
+        st.dataframe(X, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 
-    with lower2:
-        st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("📌 Prediction Summary")
-        st.write(f"**Machine:** {machine.upper()}")
-        st.write(f"**Condition:** {sev_pred}")
-        st.write(f"**Fault Flag:** {ff_pred}")
-        st.write(f"**Fault Type:** {fault_type_pred}")
-        st.write(f"**RUL:** {'N/A' if rul_hours is None else f'{rul_hours:,.2f} hours'}")
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    st.write("")
-    st.markdown('<div class="card">', unsafe_allow_html=True)
-    st.subheader("📋 Submitted Inputs")
-    st.dataframe(X, use_container_width=True)
-    st.markdown("</div>", unsafe_allow_html=True)
+    except Exception as e:
+        st.error(f"Prediction failed: {e}")

@@ -37,6 +37,7 @@ from sklearn.neighbors import KNeighborsRegressor
 from maintenance_ml import (
     MACHINES,
     load_machine_df,
+    build_modeling_frame,
     build_preprocessor,
     save_bundle,
     build_rul_target,
@@ -44,7 +45,6 @@ from maintenance_ml import (
 
 warnings.filterwarnings("ignore")
 
-# ---------- Plot style ----------
 plt.rcParams["figure.figsize"] = (10, 6)
 plt.rcParams["axes.titlesize"] = 14
 plt.rcParams["axes.labelsize"] = 12
@@ -67,18 +67,14 @@ def normalize_col_name(col_name: str) -> str:
 
 def is_time_like_column(col_name: str) -> bool:
     name = normalize_col_name(col_name)
-
-    # Exact matches
     if name in {
         "DAY", "WEEK", "DATE", "TIME", "TIMESTAMP", "DATETIME",
-        "DAILY CONDITION", "DAILY CONDITION_1"
+        "DAILY CONDITION", "WEEKLY CONDITION"
     }:
         return True
-
-    # Prefix matches for variants like DAY_1, WEEK_1, DAILY CONDITION_2, etc.
     prefixes = (
         "DAY", "WEEK", "DATE", "TIME", "TIMESTAMP", "DATETIME",
-        "DAILY CONDITION"
+        "DAILY CONDITION", "WEEKLY CONDITION"
     )
     return any(name.startswith(prefix) for prefix in prefixes)
 
@@ -86,15 +82,13 @@ def is_time_like_column(col_name: str) -> bool:
 def should_exclude_feature(machine: str, col_name: str) -> bool:
     name = normalize_col_name(col_name)
 
-    # Remove time-like / daily condition leakage columns
     if is_time_like_column(col_name):
         return True
 
-    # Machine-specific exclusions
-    if machine == "genset" and name == "REMARKS":
+    if "CONDITION" in name:
         return True
 
-    if machine == "pellet" and name in {"DAILY CONDITION_1", "DAILY CONDITION"}:
+    if machine == "genset" and name == "REMARKS":
         return True
 
     return False
@@ -104,6 +98,10 @@ def filter_feature_columns(machine: str, X: pd.DataFrame) -> pd.DataFrame:
     cols_to_drop = [c for c in X.columns if should_exclude_feature(machine, c)]
     X = X.drop(columns=cols_to_drop, errors="ignore")
     X = X.dropna(axis=1, how="all")
+
+    nunique = X.nunique(dropna=False)
+    constant_cols = nunique[nunique <= 1].index.tolist()
+    X = X.drop(columns=constant_cols, errors="ignore")
     return X
 
 
@@ -140,7 +138,6 @@ def get_classifiers() -> Dict[str, Any]:
 
     try:
         from xgboost import XGBClassifier
-
         models["XGBoost"] = XGBClassifier(
             n_estimators=600,
             learning_rate=0.05,
@@ -155,7 +152,6 @@ def get_classifiers() -> Dict[str, Any]:
 
     try:
         from lightgbm import LGBMClassifier
-
         models["LightGBM"] = LGBMClassifier(
             n_estimators=800,
             learning_rate=0.05,
@@ -218,7 +214,6 @@ def get_regressors() -> Dict[str, Any]:
 
     try:
         from xgboost import XGBRegressor
-
         regs["XGB_Reg"] = XGBRegressor(
             n_estimators=800,
             learning_rate=0.05,
@@ -232,7 +227,6 @@ def get_regressors() -> Dict[str, Any]:
 
     try:
         from lightgbm import LGBMRegressor
-
         regs["LightGBM_Reg"] = LGBMRegressor(
             n_estimators=800,
             learning_rate=0.05,
@@ -268,16 +262,26 @@ def get_regressors() -> Dict[str, Any]:
     return regs
 
 
+def safe_stratified_cv(y: pd.Series):
+    min_class_count = y.value_counts().min()
+    n_splits = min(5, int(min_class_count)) if pd.notna(min_class_count) else 0
+    if n_splits < 2:
+        return None
+    return StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+
+def safe_kfold(n_rows: int):
+    n_splits = min(5, max(2, n_rows // 10))
+    return KFold(n_splits=n_splits, shuffle=True, random_state=42)
+
+
 def evaluate_classifier(name: str, pipe: Pipeline, X: pd.DataFrame, y: pd.Series) -> Dict[str, Any]:
-    cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+    cv = safe_stratified_cv(y)
+    if cv is None:
+        raise ValueError(f"Not enough samples per class for {name}")
 
-    f1_macro = cross_val_score(
-        pipe, X, y, cv=cv, scoring="f1_macro", error_score="raise"
-    ).mean()
-
-    acc = cross_val_score(
-        pipe, X, y, cv=cv, scoring="accuracy", error_score="raise"
-    ).mean()
+    f1_macro = cross_val_score(pipe, X, y, cv=cv, scoring="f1_macro", error_score="raise").mean()
+    acc = cross_val_score(pipe, X, y, cv=cv, scoring="accuracy", error_score="raise").mean()
 
     y_pred_cv = cross_val_predict(pipe, X, y, cv=cv)
     labels = sorted(pd.Series(y).astype(str).unique().tolist())
@@ -308,8 +312,7 @@ def evaluate_classifier(name: str, pipe: Pipeline, X: pd.DataFrame, y: pd.Series
 
 
 def evaluate_regressor(name: str, pipe: Pipeline, X: pd.DataFrame, y: np.ndarray) -> Dict[str, Any]:
-    cv = KFold(n_splits=5, shuffle=True, random_state=42)
-
+    cv = safe_kfold(len(X))
     preds = cross_val_predict(pipe, X, y, cv=cv)
     mae = mean_absolute_error(y, preds)
     rmse = np.sqrt(mean_squared_error(y, preds))
@@ -365,7 +368,6 @@ def plot_bar_ranking(
 
 def plot_confusion_matrix(cm: np.ndarray, labels: list[str], title: str, save_path: str) -> None:
     plt.figure(figsize=(7.2, 6.2))
-
     im = plt.imshow(cm, interpolation="nearest", cmap="Blues", aspect="auto")
     plt.title(title, fontweight="bold", fontsize=13)
     plt.colorbar(im, fraction=0.046, pad=0.04)
@@ -398,8 +400,7 @@ def plot_confusion_matrix(cm: np.ndarray, labels: list[str], title: str, save_pa
 
 
 def save_classification_report_table(report_dict: dict, save_path: str) -> None:
-    df = pd.DataFrame(report_dict).T
-    df.to_csv(save_path, index=True)
+    pd.DataFrame(report_dict).T.to_csv(save_path, index=True)
 
 
 def get_feature_importance_from_pipeline(
@@ -436,9 +437,8 @@ def plot_feature_importance(
     save_path: str,
     top_n: int = 15,
 ) -> None:
-    df = pd.DataFrame(
-        {"feature": feature_names, "importance": importances}
-    ).sort_values("importance", ascending=False).head(top_n)
+    df = pd.DataFrame({"feature": feature_names, "importance": importances})
+    df = df.sort_values("importance", ascending=False).head(top_n)
 
     plt.figure(figsize=(10, 7))
     plt.barh(df["feature"][::-1], df["importance"][::-1])
@@ -501,9 +501,7 @@ def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None
 
         df = pd.DataFrame(rows).sort_values("f1_macro", ascending=False).reset_index(drop=True)
         df.insert(0, "rank", np.arange(1, len(df) + 1))
-
-        csv_path = os.path.join(machine_dir, f"{machine}_{sec}_leaderboard.csv")
-        df.to_csv(csv_path, index=False)
+        df.to_csv(os.path.join(machine_dir, f"{machine}_{sec}_leaderboard.csv"), index=False)
 
         plot_bar_ranking(
             df,
@@ -559,9 +557,7 @@ def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None
 
         df = pd.DataFrame(rows).sort_values("mae", ascending=True).reset_index(drop=True)
         df.insert(0, "rank", np.arange(1, len(df) + 1))
-
-        csv_path = os.path.join(machine_dir, f"{machine}_rul_leaderboard.csv")
-        df.to_csv(csv_path, index=False)
+        df.to_csv(os.path.join(machine_dir, f"{machine}_rul_leaderboard.csv"), index=False)
 
         plot_bar_ranking(
             df,
@@ -609,27 +605,25 @@ def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None
 
 def train_machine(machine: str) -> Dict[str, Any]:
     cfg = MACHINES[machine]
-    df = load_machine_df(machine)
+    df_raw = load_machine_df(machine)
+    df = build_modeling_frame(machine, history_steps=3)
+
     cond_col = cfg["condition_col"]
     time_key = cfg["time_key"]
 
     drop_cols = {cond_col, "condition_severity", "fault_type", "fault_flag"}
     X = df.drop(columns=[c for c in drop_cols if c in df.columns], errors="ignore")
-
-    # Remove time-like leakage columns and machine-specific excluded inputs
     X = filter_feature_columns(machine, X)
 
-    y_sev = df["condition_severity"].astype(str)
-    y_fault_flag = df["fault_flag"].astype(str)
+    valid_mask = ~X.isna().all(axis=1)
+    X = X.loc[valid_mask].copy()
 
-    fault_rows = df["fault_type"].astype(str) != "Normal"
-    y_fault_type = df.loc[fault_rows, "fault_type"].astype(str)
-    X_fault = X.loc[fault_rows].copy()
+    y_sev = df.loc[valid_mask, "condition_severity"].astype(str)
+    y_fault_flag = df.loc[valid_mask, "fault_flag"].astype(str)
 
     pre, _, _ = build_preprocessor(X)
     clf_models = get_classifiers()
 
-    # Severity
     sev_results = []
     sev_pipes = {}
     for name, model in clf_models.items():
@@ -645,7 +639,6 @@ def train_machine(machine: str) -> Dict[str, Any]:
         raise RuntimeError(f"No severity models trained successfully for machine: {machine}")
     sev_leader = sorted(sev_results, key=lambda d: d["f1_macro"], reverse=True)
 
-    # Fault flag
     ff_results = []
     ff_pipes = {}
     for name, model in clf_models.items():
@@ -661,36 +654,49 @@ def train_machine(machine: str) -> Dict[str, Any]:
         raise RuntimeError(f"No fault-flag models trained successfully for machine: {machine}")
     ff_leader = sorted(ff_results, key=lambda d: d["f1_macro"], reverse=True)
 
-    # Fault type
     ft_leader = []
     ft_pipes = {}
-    if len(X_fault) >= 30 and y_fault_type.nunique() >= 2:
-        pre_fault, _, _ = build_preprocessor(X_fault)
-        for name, model in clf_models.items():
-            pipe = Pipeline([("pre", pre_fault), ("model", model)])
-            try:
-                r = evaluate_classifier(name, pipe, X_fault, y_fault_type)
-                ft_leader.append(r)
-                ft_pipes[name] = pipe
-            except Exception as e:
-                print(f"[WARNING] Skipping fault type model '{name}' for {machine}: {e}")
-        ft_leader = sorted(ft_leader, key=lambda d: d["f1_macro"], reverse=True)
+    ft_best = None
 
-    # RUL
-    df_rul = build_rul_target(df, machine, time_key, cond_col)
+    if cfg["fault_type_mode"] == "ml":
+        fault_rows = df.loc[valid_mask, "fault_type"].astype(str) != "Normal"
+        X_fault = X.loc[fault_rows].copy()
+        y_fault_type = df.loc[valid_mask, "fault_type"].astype(str).loc[fault_rows]
+
+        if len(X_fault) >= 20 and y_fault_type.nunique() >= 2:
+            pre_fault, _, _ = build_preprocessor(X_fault)
+            for name, model in clf_models.items():
+                pipe = Pipeline([("pre", pre_fault), ("model", model)])
+                try:
+                    r = evaluate_classifier(name, pipe, X_fault, y_fault_type)
+                    ft_leader.append(r)
+                    ft_pipes[name] = pipe
+                except Exception as e:
+                    print(f"[WARNING] Skipping fault type model '{name}' for {machine}: {e}")
+
+            ft_leader = sorted(ft_leader, key=lambda d: d["f1_macro"], reverse=True)
+            if ft_leader:
+                ft_best = ft_leader[0]["model"]
+                ft_pipes[ft_best].fit(X_fault, y_fault_type)
+
+    df_rul = build_rul_target(df_raw, machine, time_key, cond_col)
+    if cfg["use_history"]:
+        df_rul = build_modeling_frame(machine, history_steps=3).join(
+            df_rul[["rul_hours"]], how="left"
+        )
+
     rul_bundle = None
     rul_leader = []
 
-    if df_rul["rul_hours"].notna().sum() >= 60:
+    if cfg["rul_enabled"] and "rul_hours" in df_rul.columns and df_rul["rul_hours"].notna().sum() >= 20:
         Xr = df_rul.drop(
             columns=[cond_col, "condition_severity", "fault_type", "fault_flag", "rul_hours"],
             errors="ignore",
         )
-        Xr = Xr.loc[df_rul["rul_hours"].notna()].copy()
-        yr = df_rul.loc[df_rul["rul_hours"].notna(), "rul_hours"].values.astype(float)
-
-        # Remove time-like leakage columns and machine-specific excluded inputs
         Xr = filter_feature_columns(machine, Xr)
+        valid_rul = df_rul["rul_hours"].notna() & ~Xr.isna().all(axis=1)
+        Xr = Xr.loc[valid_rul].copy()
+        yr = df_rul.loc[valid_rul, "rul_hours"].values.astype(float)
 
         pre_r, _, _ = build_preprocessor(Xr)
         regs = get_regressors()
@@ -721,11 +727,6 @@ def train_machine(machine: str) -> Dict[str, Any]:
     sev_pipes[best_sev].fit(X, y_sev)
     ff_pipes[best_ff].fit(X, y_fault_flag)
 
-    ft_best = None
-    if ft_leader:
-        ft_best = ft_leader[0]["model"]
-        ft_pipes[ft_best].fit(X_fault, y_fault_type)
-
     bundle = {
         "machine": machine,
         "feature_columns": list(X.columns),
@@ -743,6 +744,7 @@ def train_machine(machine: str) -> Dict[str, Any]:
             "best_model": ft_best,
             "pipelines": ft_pipes,
             "leaderboard": ft_leader,
+            "mode": cfg["fault_type_mode"],
         },
         "rul": rul_bundle,
     }
@@ -764,13 +766,8 @@ def main() -> None:
         print(f"Saved bundle for: {m}")
         print("Best severity:", bundle["severity"]["best_model"])
         print("Best fault flag:", bundle["fault_flag"]["best_model"])
-
-        if bundle["fault_type"]["best_model"]:
-            print("Best fault type:", bundle["fault_type"]["best_model"])
-
-        if bundle["rul"]:
-            print("Best RUL:", bundle["rul"]["best_model"])
-
+        print("Best fault type:", bundle["fault_type"]["best_model"] if bundle["fault_type"]["best_model"] else "rule_based")
+        print("Best RUL:", bundle["rul"]["best_model"] if bundle["rul"] else "N/A")
         print("Final feature columns used:")
         print(bundle["feature_columns"])
         print("-" * 50)
@@ -781,7 +778,7 @@ def main() -> None:
             "machine": m,
             "best_severity_model": bundle["severity"]["best_model"],
             "best_fault_flag_model": bundle["fault_flag"]["best_model"],
-            "best_fault_type_model": bundle["fault_type"]["best_model"],
+            "best_fault_type_model": bundle["fault_type"]["best_model"] if bundle["fault_type"]["best_model"] else "rule_based",
             "best_rul_model": bundle["rul"]["best_model"] if bundle["rul"] else None,
         })
 
