@@ -407,10 +407,9 @@ if machine in ["boiler", "pellet"]:
 else:
     st.caption("Enter the current/latest values only.")
 
-with st.expander("Show / Hide Input Form", expanded=True):
-    with st.form("prediction_form"):
-        input_rows = build_grouped_input_form(machine, base_fields, history_steps)
-        predict_btn = st.form_submit_button("🚀 Predict Machine Status", use_container_width=True)
+with st.form("prediction_form"):
+    input_rows = build_grouped_input_form(machine, base_fields, history_steps)
+    predict_btn = st.form_submit_button("🚀 Predict Machine Status", use_container_width=True)
 
 st.markdown("</div>", unsafe_allow_html=True)
 
