@@ -452,16 +452,19 @@ if predict_btn:
         days_before_fault = None
         rul_model_name = "N/A"
 
-        if cfg["rul_enabled"] and bundle.get("rul"):
+        if final_condition != "Fault" and cfg["rul_enabled"] and bundle.get("rul"):
             try:
                 best_rul = bundle["rul"]["best_model"]
                 rul_model_name = best_rul
                 rul_pipe = bundle["rul"]["pipelines"][best_rul]
+
                 val_hours = float(rul_pipe.predict(X)[0])
                 if np.isfinite(val_hours) and val_hours >= 0:
                     days_before_fault = val_hours / 24.0
             except Exception:
                 days_before_fault = None
+        else:
+            days_before_fault = None
 
         fixes = suggest_fix(machine, fault_type_pred)
 
