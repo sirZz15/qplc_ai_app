@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import warnings
+from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
 
 import numpy as np
@@ -33,6 +35,7 @@ from sklearn.ensemble import (
 )
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsRegressor
+from sklearn.preprocessing import StandardScaler
 
 from maintenance_ml import (
     MACHINES,
@@ -42,6 +45,15 @@ from maintenance_ml import (
     save_bundle,
     build_rul_target,
 )
+
+try:
+    import tensorflow as tf
+    from tensorflow.keras.models import Sequential
+    from tensorflow.keras.layers import LSTM, Dense, Dropout, Masking
+    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+    TF_AVAILABLE = True
+except Exception:
+    TF_AVAILABLE = False
 
 warnings.filterwarnings("ignore")
 
@@ -91,10 +103,11 @@ def should_exclude_feature(machine: str, col_name: str) -> bool:
     if machine == "genset" and name == "REMARKS":
         return True
 
-    # Pellet-specific exclusions
-    if machine == "pellet":
-        if name == "OPERATING HOURS":
-            return True
+    if machine == "pellet" and name in {"OPERATING HOURS", "HOURS", "FEED TYPE"}:
+        return True
+
+    if machine == "boiler" and name == "OPERATING HOURS":
+        return True
 
     return False
 
@@ -462,8 +475,8 @@ def plot_actual_vs_predicted(y_true: np.ndarray, y_pred: np.ndarray, title: str,
     max_v = max(np.max(y_true), np.max(y_pred))
     plt.plot([min_v, max_v], [min_v, max_v], linestyle="--")
     plt.title(title, fontweight="bold")
-    plt.xlabel("Actual RUL")
-    plt.ylabel("Predicted RUL")
+    plt.xlabel("Actual")
+    plt.ylabel("Predicted")
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(save_path, bbox_inches="tight")
@@ -476,12 +489,420 @@ def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, title: str, save_path
     plt.scatter(y_pred, residuals, alpha=0.7)
     plt.axhline(0, linestyle="--")
     plt.title(title, fontweight="bold")
-    plt.xlabel("Predicted RUL")
+    plt.xlabel("Predicted")
     plt.ylabel("Residual (Actual - Predicted)")
     plt.grid(alpha=0.3)
     plt.tight_layout()
     plt.savefig(save_path, bbox_inches="tight")
     plt.close()
+
+
+def get_excel_source_path() -> str:
+    env_path = os.environ.get("QPLC_XLSX_PATH")
+    if env_path and os.path.exists(env_path):
+        return env_path
+
+    base_dir = Path(__file__).resolve().parent
+    cwd = Path.cwd()
+
+    candidates = [
+        base_dir / "QPLC-Maintenance Data.xlsx",
+        cwd / "QPLC-Maintenance Data.xlsx",
+        base_dir / "data" / "QPLC-Maintenance Data.xlsx",
+        cwd / "data" / "QPLC-Maintenance Data.xlsx",
+        cwd / "qplc_ai_app" / "data" / "QPLC-Maintenance Data.xlsx",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            return str(p)
+
+    raise FileNotFoundError(
+        "Could not find QPLC-Maintenance Data.xlsx. "
+        "Expected it in qplc_ai_app/data or beside train_models.py."
+    )
+
+
+def is_fault_text(v: Any) -> bool:
+    s = str(v).strip().lower()
+
+    if s in {"", "-", "nan", "none", "normal", "ok", "good", "healthy", "no fault"}:
+        return False
+
+    abnormal_keywords = [
+        "fault",
+        "trend",
+        "repair",
+        "trip",
+        "leak",
+        "low",
+        "high",
+        "overload",
+        "overheat",
+        "failure",
+        "malfunction",
+        "unstable",
+        "critical",
+        "reset",
+    ]
+    return any(k in s for k in abnormal_keywords)
+
+
+def read_raw_machine_sheet(machine: str) -> pd.DataFrame:
+    source_path = get_excel_source_path()
+    print(f"[LSTM DEBUG] Using Excel file: {source_path}")
+
+    sheet_map = {
+        "boiler": "Boiler",
+        "genset": "Gen Set",
+        "pellet": "Pellet Mill",
+    }
+    sheet_name = sheet_map[machine]
+
+    df = pd.read_excel(source_path, sheet_name=sheet_name, header=0)
+    df.columns = [str(c).strip() for c in df.columns]
+    df = df.dropna(how="all").copy()
+
+    rename_common = {
+        "DAILY CONDITION": "DAILY_CONDITION",
+    }
+    df = df.rename(columns=rename_common)
+
+    if "DAY" not in df.columns:
+        raise ValueError(f"'DAY' column not found in sheet: {sheet_name}. Columns found: {list(df.columns)}")
+
+    df["DAY"] = pd.to_numeric(df["DAY"], errors="coerce").ffill()
+    df = df.dropna(subset=["DAY"]).copy()
+    df["DAY"] = df["DAY"].astype(int)
+
+    print(f"[LSTM DEBUG] {machine} raw columns: {list(df.columns)}")
+    return df
+
+
+def aggregate_daily_for_lstm(machine: str) -> pd.DataFrame:
+    df = read_raw_machine_sheet(machine).copy()
+
+    if machine == "boiler":
+        rename_map = {
+            "DAY": "DAY",
+            "BOILER WATER": "BOILER_WATER",
+            "BOILER MAIN STEAM PRESSURE": "MAIN_STEAM_PRESSURE",
+            "BOILER FUEL GAS": "FUEL_GAS_TEMP",
+            "BURNER FUEL PRESSURE": "BURNER_FUEL_PRESSURE",
+            "FEED WATER TANK": "FEED_WATER_TANK_LEVEL",
+            "FEED WATER TEMP": "FEED_WATER_TEMP",
+            "DAILY_CONDITION": "DAILY_CONDITION",
+        }
+        df = df.rename(columns=rename_map)
+
+        numeric_cols = [
+            "BOILER_WATER",
+            "MAIN_STEAM_PRESSURE",
+            "FUEL_GAS_TEMP",
+            "BURNER_FUEL_PRESSURE",
+            "FEED_WATER_TANK_LEVEL",
+            "FEED_WATER_TEMP",
+        ]
+
+    elif machine == "pellet":
+        rename_map = {
+            "DAY": "DAY",
+            "AMP1 (100AMP)": "AMP1",
+            "AMP2 (100AMP)": "AMP2",
+            "US PRESS (4.5-8BARS)": "US_PRESS",
+            "DS PRESS (1.8-3BARS)": "DS_PRESS",
+            "FEEDER RATE (60HERTZ) - (%)": "FEEDER_RATE",
+            "TEMPERATURE": "TEMPERATURE",
+            "DAILY_CONDITION": "DAILY_CONDITION",
+        }
+        df = df.rename(columns=rename_map)
+
+        numeric_cols = [
+            "AMP1",
+            "AMP2",
+            "US_PRESS",
+            "DS_PRESS",
+            "FEEDER_RATE",
+            "TEMPERATURE",
+        ]
+
+    else:
+        raise ValueError(f"Unsupported machine for LSTM daily aggregation: {machine}")
+
+    required_cols = ["DAY", "DAILY_CONDITION"] + numeric_cols
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"Missing expected columns for {machine}: {missing}. "
+            f"Available columns: {list(df.columns)}"
+        )
+
+    for c in numeric_cols:
+        df[c] = pd.to_numeric(df[c], errors="coerce")
+
+    df["fault_row"] = df["DAILY_CONDITION"].apply(is_fault_text).astype(int)
+
+    agg_map = {}
+    for c in numeric_cols:
+        agg_map[f"{c}_mean"] = (c, "mean")
+        agg_map[f"{c}_min"] = (c, "min")
+        agg_map[f"{c}_max"] = (c, "max")
+        agg_map[f"{c}_std"] = (c, "std")
+        agg_map[f"{c}_last"] = (c, lambda x: x.dropna().iloc[-1] if len(x.dropna()) else np.nan)
+
+    daily = df.groupby("DAY").agg(
+        **agg_map,
+        fault_flag_binary=("fault_row", "max"),
+    ).reset_index()
+
+    daily = daily.sort_values("DAY").reset_index(drop=True)
+
+    std_cols = [c for c in daily.columns if c.endswith("_std")]
+    for c in std_cols:
+        daily[c] = daily[c].fillna(0)
+
+    print(f"[LSTM DEBUG] {machine} daily columns: {list(daily.columns)}")
+    return daily
+
+
+def build_days_to_fault_target(daily_df: pd.DataFrame) -> pd.DataFrame:
+    df = daily_df.copy().reset_index(drop=True)
+
+    fault_indices = np.where(df["fault_flag_binary"].values == 1)[0]
+    days_to_fault = np.full(len(df), np.nan, dtype=float)
+
+    if len(fault_indices) == 0:
+        df["days_to_fault"] = days_to_fault
+        return df
+
+    for i in range(len(df)):
+        next_faults = fault_indices[fault_indices >= i]
+        if len(next_faults) == 0:
+            continue
+        next_idx = next_faults[0]
+        days_to_fault[i] = float(df.loc[next_idx, "DAY"] - df.loc[i, "DAY"])
+
+    df["days_to_fault"] = days_to_fault
+    return df
+
+
+def make_lstm_sequences(
+    df_daily: pd.DataFrame,
+    feature_cols: list[str],
+    seq_len: int = 7,
+) -> tuple[np.ndarray, np.ndarray, list[int], StandardScaler]:
+    df = df_daily.copy().reset_index(drop=True)
+
+    valid = df["days_to_fault"].notna()
+    df = df.loc[valid].reset_index(drop=True)
+
+    if len(df) <= seq_len:
+        raise ValueError("Not enough daily rows to build LSTM sequences.")
+
+    scaler = StandardScaler()
+    X_all = scaler.fit_transform(df[feature_cols].astype(float).values)
+
+    X_seq, y_seq, day_refs = [], [], []
+
+    for i in range(seq_len, len(df)):
+        X_seq.append(X_all[i - seq_len:i, :])
+        y_seq.append(float(df.loc[i, "days_to_fault"]))
+        day_refs.append(int(df.loc[i, "DAY"]))
+
+    return np.array(X_seq, dtype=np.float32), np.array(y_seq, dtype=np.float32), day_refs, scaler
+
+
+def build_lstm_regressor(input_shape: tuple[int, int]) -> Sequential:
+    model = Sequential([
+        Masking(mask_value=0.0, input_shape=input_shape),
+        LSTM(64, return_sequences=True),
+        Dropout(0.2),
+        LSTM(32),
+        Dropout(0.2),
+        Dense(16, activation="relu"),
+        Dense(1, activation="relu"),
+    ])
+
+    model.compile(
+        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
+        loss="mse",
+        metrics=["mae"],
+    )
+    return model
+
+
+def train_lstm_days_to_fault(
+    machine: str,
+    results_dir: str,
+    seq_len: int = 7,
+    epochs: int = 100,
+    batch_size: int = 16,
+) -> Optional[Dict[str, Any]]:
+    if not TF_AVAILABLE:
+        print(f"[WARNING] TensorFlow is not installed. Skipping LSTM for {machine}.")
+        return None
+
+    if machine not in {"boiler", "pellet"}:
+        return None
+
+    daily = aggregate_daily_for_lstm(machine)
+    daily = build_days_to_fault_target(daily)
+
+    feature_cols = [
+        c for c in daily.columns
+        if c not in {"DAY", "fault_flag_binary", "days_to_fault"}
+        and pd.api.types.is_numeric_dtype(daily[c])
+    ]
+
+    usable = int(daily["days_to_fault"].notna().sum())
+    fault_days = int(daily["fault_flag_binary"].sum())
+
+    print(f"[LSTM DEBUG] {machine} unique days = {len(daily)}")
+    print(f"[LSTM DEBUG] {machine} fault days = {fault_days}")
+    print(f"[LSTM DEBUG] {machine} usable days_to_fault rows = {usable}")
+    print(f"[LSTM DEBUG] {machine} feature count = {len(feature_cols)}")
+
+    if len(feature_cols) == 0:
+        print(f"[WARNING] No valid numeric daily features for LSTM on {machine}.")
+        return None
+
+    if usable < (seq_len + 10):
+        print(f"[WARNING] Not enough valid daily data for LSTM on {machine}. Need more rows.")
+        return None
+
+    X, y, day_refs, scaler = make_lstm_sequences(daily, feature_cols, seq_len=seq_len)
+
+    split_idx = int(len(X) * 0.8)
+    if split_idx < 1 or len(X) - split_idx < 1:
+        print(f"[WARNING] Not enough sequences after split for {machine}.")
+        return None
+
+    X_train, X_test = X[:split_idx], X[split_idx:]
+    y_train, y_test = y[:split_idx], y[split_idx:]
+    day_test = day_refs[split_idx:]
+
+    model = build_lstm_regressor((X.shape[1], X.shape[2]))
+
+    callbacks = [
+        EarlyStopping(
+            monitor="val_loss",
+            patience=12,
+            restore_best_weights=True,
+            verbose=1,
+        ),
+        ReduceLROnPlateau(
+            monitor="val_loss",
+            factor=0.5,
+            patience=6,
+            min_lr=1e-5,
+            verbose=1,
+        ),
+    ]
+
+    history = model.fit(
+        X_train,
+        y_train,
+        validation_data=(X_test, y_test),
+        epochs=epochs,
+        batch_size=batch_size,
+        verbose=1,
+        callbacks=callbacks,
+        shuffle=False,
+    )
+
+    pred_test = model.predict(X_test, verbose=0).reshape(-1)
+    pred_test = np.maximum(pred_test, 0)
+
+    mae = float(mean_absolute_error(y_test, pred_test))
+    rmse = float(np.sqrt(mean_squared_error(y_test, pred_test)))
+    r2 = float(r2_score(y_test, pred_test))
+
+    machine_dir = os.path.join(results_dir, machine)
+    ensure_dir(machine_dir)
+
+    model_path = os.path.join(machine_dir, f"{machine}_lstm_days_to_fault.keras")
+    scaler_path = os.path.join(machine_dir, f"{machine}_lstm_scaler.npz")
+    meta_path = os.path.join(machine_dir, f"{machine}_lstm_metadata.json")
+    preds_path = os.path.join(machine_dir, f"{machine}_lstm_test_predictions.csv")
+    loss_plot_path = os.path.join(machine_dir, f"{machine}_lstm_training_loss.png")
+    avp_plot_path = os.path.join(machine_dir, f"{machine}_lstm_actual_vs_predicted_days.png")
+    residual_plot_path = os.path.join(machine_dir, f"{machine}_lstm_residuals_days.png")
+
+    model.save(model_path)
+
+    np.savez(
+        scaler_path,
+        mean_=scaler.mean_,
+        scale_=scaler.scale_,
+    )
+
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(
+            {
+                "machine": machine,
+                "seq_len": seq_len,
+                "feature_cols": feature_cols,
+                "target": "days_to_fault",
+                "metrics": {
+                    "mae_days": mae,
+                    "rmse_days": rmse,
+                    "r2": r2,
+                },
+                "debug": {
+                    "unique_days": int(len(daily)),
+                    "fault_days": fault_days,
+                    "usable_days_to_fault_rows": usable,
+                },
+            },
+            f,
+            indent=2,
+        )
+
+    pd.DataFrame({
+        "DAY": day_test,
+        "actual_days_to_fault": y_test,
+        "predicted_days_to_fault": pred_test,
+    }).to_csv(preds_path, index=False)
+
+    plt.figure(figsize=(8, 5))
+    plt.plot(history.history["loss"], label="train_loss")
+    plt.plot(history.history["val_loss"], label="val_loss")
+    plt.title(f"{machine.upper()} - LSTM Training Loss", fontweight="bold")
+    plt.xlabel("Epoch")
+    plt.ylabel("MSE Loss")
+    plt.legend()
+    plt.grid(alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(loss_plot_path, bbox_inches="tight")
+    plt.close()
+
+    plot_actual_vs_predicted(
+        y_true=y_test,
+        y_pred=pred_test,
+        title=f"{machine.upper()} - LSTM Actual vs Predicted Days to Fault",
+        save_path=avp_plot_path,
+    )
+
+    plot_residuals(
+        y_true=y_test,
+        y_pred=pred_test,
+        title=f"{machine.upper()} - LSTM Residual Plot (Days to Fault)",
+        save_path=residual_plot_path,
+    )
+
+    return {
+        "machine": machine,
+        "model_type": "LSTM_days_to_fault",
+        "model_path": model_path,
+        "scaler_path": scaler_path,
+        "metadata_path": meta_path,
+        "predictions_path": preds_path,
+        "feature_cols": feature_cols,
+        "seq_len": seq_len,
+        "mae_days": mae,
+        "rmse_days": rmse,
+        "r2": r2,
+    }
 
 
 def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None:
@@ -606,6 +1027,13 @@ def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None
                         save_path=os.path.join(machine_dir, f"{machine}_rul_feature_importance.png"),
                         top_n=15,
                     )
+
+
+def save_lstm_summary(all_lstm_rows: list[dict], results_dir: str) -> None:
+    if not all_lstm_rows:
+        return
+    df = pd.DataFrame(all_lstm_rows)
+    df.to_csv(os.path.join(results_dir, "deep_learning_lstm_summary.csv"), index=False)
 
 
 def train_machine(machine: str) -> Dict[str, Any]:
@@ -762,6 +1190,7 @@ def main() -> None:
     ensure_dir(results_dir)
 
     summary_rows = []
+    lstm_rows = []
 
     for m in MACHINES.keys():
         print(f"Training: {m}")
@@ -787,10 +1216,32 @@ def main() -> None:
             "best_rul_model": bundle["rul"]["best_model"] if bundle["rul"] else None,
         })
 
+        if m in {"boiler", "pellet"}:
+            try:
+                lstm_result = train_lstm_days_to_fault(
+                    machine=m,
+                    results_dir=results_dir,
+                    seq_len=7,
+                    epochs=100,
+                    batch_size=16,
+                )
+                if lstm_result is not None:
+                    lstm_rows.append(lstm_result)
+                    print(
+                        f"[LSTM] {m} -> "
+                        f"MAE(days): {lstm_result['mae_days']:.3f}, "
+                        f"RMSE(days): {lstm_result['rmse_days']:.3f}, "
+                        f"R2: {lstm_result['r2']:.3f}"
+                    )
+            except Exception as e:
+                print(f"[WARNING] LSTM training failed for {m}: {e}")
+
     pd.DataFrame(summary_rows).to_csv(
         os.path.join(results_dir, "overall_best_models_summary.csv"),
         index=False
     )
+
+    save_lstm_summary(lstm_rows, results_dir)
 
 
 if __name__ == "__main__":

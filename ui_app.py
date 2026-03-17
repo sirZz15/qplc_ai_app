@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import re
-from typing import Dict, Any, List
+import json
+from typing import Dict, Any, List, Optional
 
 import numpy as np
 import pandas as pd
@@ -15,7 +16,14 @@ from maintenance_ml import (
     build_history_input_frame,
     infer_boiler_fault_type_rules,
     infer_genset_fault_type_rules,
+    ensure_lstm_artifacts_exist,
 )
+
+try:
+    from tensorflow.keras.models import load_model
+    TF_APP_AVAILABLE = True
+except Exception:
+    TF_APP_AVAILABLE = False
 
 st.set_page_config(
     page_title="QPLC AI Predictive Maintenance Dashboard",
@@ -335,10 +343,8 @@ def build_grouped_input_form(
 
     if history_steps == 1:
         labels = ["Current Day"]
-    elif history_steps == 3:
-        labels = ["Day -2", "Day -1", "Current Day"]
     else:
-        labels = [f"Step {i + 1}" for i in range(history_steps - 1)] + ["Current Day"]
+        labels = [f"Day -{history_steps - 1 - i}" for i in range(history_steps - 1)] + ["Current Day"]
 
     for row_idx in range(history_steps):
         row_inputs: Dict[str, Any] = {}
@@ -417,6 +423,114 @@ def final_machine_condition(sev_pred: str, ff_pred: str) -> str:
 
 
 # =========================================================
+# LSTM helpers
+# =========================================================
+@st.cache_resource
+def load_lstm_artifacts(machine: str) -> Optional[Dict[str, Any]]:
+    if not TF_APP_AVAILABLE:
+        return None
+
+    if machine not in {"boiler", "pellet"}:
+        return None
+
+    try:
+        paths = ensure_lstm_artifacts_exist(machine)
+    except Exception:
+        return None
+
+    model = load_model(paths["model"])
+
+    with open(paths["meta"], "r", encoding="utf-8") as f:
+        metadata = json.load(f)
+
+    scaler_npz = np.load(paths["scaler"])
+    scaler_mean = scaler_npz["mean_"]
+    scaler_scale = scaler_npz["scale_"]
+
+    return {
+        "model": model,
+        "metadata": metadata,
+        "scaler_mean": scaler_mean,
+        "scaler_scale": scaler_scale,
+    }
+
+
+def _safe_float(v: Any) -> float:
+    try:
+        return float(v)
+    except Exception:
+        return 0.0
+
+
+def build_lstm_sequence_from_inputs(machine: str, input_rows: List[Dict[str, Any]], lstm_meta: Dict[str, Any]) -> np.ndarray:
+    feature_cols = lstm_meta["metadata"]["feature_cols"]
+    seq_len = int(lstm_meta["metadata"]["seq_len"])
+
+    if len(input_rows) != seq_len:
+        raise ValueError(f"LSTM expects {seq_len} rows, but app collected {len(input_rows)} rows.")
+
+    row_feature_maps = []
+
+    for row in input_rows:
+        if machine == "boiler":
+            base_map = {
+                "BOILER_WATER": _safe_float(row.get("BOILER WATER", 0.0)),
+                "MAIN_STEAM_PRESSURE": _safe_float(row.get("BOILER MAIN STEAM PRESSURE", 0.0)),
+                "FUEL_GAS_TEMP": _safe_float(row.get("BOILER FUEL GAS", 0.0)),
+                "BURNER_FUEL_PRESSURE": _safe_float(row.get("BURNER FUEL PRESSURE", 0.0)),
+                "FEED_WATER_TANK_LEVEL": _safe_float(row.get("FEED WATER TANK", 0.0)),
+                "FEED_WATER_TEMP": _safe_float(row.get("FEED WATER TEMP", 0.0)),
+            }
+        elif machine == "pellet":
+            base_map = {
+                "AMP1": _safe_float(row.get("AMP1 (100AMP)", 0.0)),
+                "AMP2": _safe_float(row.get("AMP2 (100AMP)", 0.0)),
+                "US_PRESS": _safe_float(row.get("US PRESS (4.5-8BARS)", 0.0)),
+                "DS_PRESS": _safe_float(row.get("DS PRESS (1.8-3BARS)", 0.0)),
+                "FEEDER_RATE": _safe_float(row.get("FEEDER RATE (60HERTZ) - (%)", 0.0)),
+                "TEMPERATURE": _safe_float(row.get("TEMPERATURE", 0.0)),
+            }
+        else:
+            raise ValueError(f"LSTM not supported for machine: {machine}")
+
+        expanded = {}
+        for k, v in base_map.items():
+            expanded[f"{k}_mean"] = v
+            expanded[f"{k}_min"] = v
+            expanded[f"{k}_max"] = v
+            expanded[f"{k}_std"] = 0.0
+            expanded[f"{k}_last"] = v
+
+        row_vector = [expanded.get(col, 0.0) for col in feature_cols]
+        row_feature_maps.append(row_vector)
+
+    X = np.array(row_feature_maps, dtype=np.float32)
+
+    mean_ = np.array(lstm_meta["scaler_mean"], dtype=np.float32)
+    scale_ = np.array(lstm_meta["scaler_scale"], dtype=np.float32)
+    scale_ = np.where(scale_ == 0, 1.0, scale_)
+
+    X = (X - mean_) / scale_
+    X = np.expand_dims(X, axis=0)
+
+    return X
+
+
+def predict_days_to_fault_lstm(machine: str, input_rows: List[Dict[str, Any]]) -> tuple[Optional[float], str]:
+    artifacts = load_lstm_artifacts(machine)
+    if artifacts is None:
+        return None, "LSTM model not available"
+
+    try:
+        X_lstm = build_lstm_sequence_from_inputs(machine, input_rows, artifacts)
+        pred = artifacts["model"].predict(X_lstm, verbose=0).reshape(-1)[0]
+        pred = max(float(pred), 0.0)
+        return pred, f"LSTM seq_len={artifacts['metadata']['seq_len']}"
+    except Exception as e:
+        return None, f"LSTM unavailable: {e}"
+
+
+# =========================================================
 # Header
 # =========================================================
 st.markdown(
@@ -449,14 +563,11 @@ if not bundle:
 
 cfg = MACHINES[machine]
 
-# Fixed input window:
-# - Boiler and Pellet: 2 past days + current day = 3 rows
-# - Genset: current day only = 1 row
-history_steps = 3 if cfg["use_history"] else 1
+history_steps = 7 if machine in {"boiler", "pellet"} else 1
 
 st.sidebar.markdown("---")
-if cfg["use_history"]:
-    st.sidebar.caption("Boiler and Pellet use 3 input sets: Day -2, Day -1, and Current Day.")
+if machine in {"boiler", "pellet"}:
+    st.sidebar.caption("Boiler and Pellet use 7 input sets: Day -6 to Current Day.")
 else:
     st.sidebar.caption("Genset uses current values only.")
 
@@ -466,6 +577,11 @@ else:
 df_ref = load_machine_df(machine)
 feature_cols = bundle["feature_columns"]
 base_fields = get_display_base_fields(feature_cols)
+
+if machine == "boiler":
+    base_fields = [f for f in base_fields if normalize_col_name(f) != "OPERATING HOURS"]
+elif machine == "pellet":
+    base_fields = [f for f in base_fields if normalize_col_name(f) not in {"HOURS", "FEED TYPE", "OPERATING HOURS"}]
 
 # =========================================================
 # Top summary
@@ -496,7 +612,7 @@ with ctop3:
     st.markdown(
         f"""
         <div class="card">
-            <div class="section-title">Best RUL Model</div>
+            <div class="section-title">Best Tabular RUL Model</div>
             <div class="small-note">{best_rul_text}</div>
         </div>
         """,
@@ -512,7 +628,7 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("🔎 Input Machine Features")
 
 if machine in ["boiler", "pellet"]:
-    st.caption("Enter exactly 3 sets of values in order: Day -2, Day -1, and Current Day.")
+    st.caption("Enter exactly 7 sets of values in order: Day -6, Day -5, Day -4, Day -3, Day -2, Day -1, and Current Day.")
 else:
     st.caption("Enter the current/latest values only.")
 
@@ -559,21 +675,21 @@ if predict_btn:
                     fault_type_pred = "N/A"
 
         days_before_fault = None
-        rul_model_name = "N/A"
+        days_model_name = "N/A"
 
-        if final_condition != "Fault" and cfg["rul_enabled"] and bundle.get("rul"):
+        if final_condition != "Fault" and machine in {"boiler", "pellet"}:
+            days_before_fault, days_model_name = predict_days_to_fault_lstm(machine, input_rows)
+
+        if final_condition != "Fault" and days_before_fault is None and cfg["rul_enabled"] and bundle.get("rul"):
             try:
                 best_rul = bundle["rul"]["best_model"]
-                rul_model_name = best_rul
                 rul_pipe = bundle["rul"]["pipelines"][best_rul]
-
                 val_hours = float(rul_pipe.predict(X)[0])
                 if np.isfinite(val_hours) and val_hours >= 0:
                     days_before_fault = val_hours / 24.0
+                    days_model_name = f"{best_rul} (RUL fallback)"
             except Exception:
                 days_before_fault = None
-        else:
-            days_before_fault = None
 
         fixes = suggest_fix(machine, fault_type_pred)
 
@@ -600,7 +716,7 @@ if predict_btn:
                 meta_text = "Machine already in Fault state"
             else:
                 value_text = "N/A" if days_before_fault is None else f"{days_before_fault:,.2f} days"
-                meta_text = "Applicable only to Boiler and Pellet" if days_before_fault is None else f"RUL model: {rul_model_name}"
+                meta_text = days_model_name
 
             render_metric_card(
                 "Days Before Fault",
@@ -625,11 +741,12 @@ if predict_btn:
             st.write(f"**Machine Condition:** {final_condition}")
             st.write(f"**Fault Type:** {fault_type_pred}")
             st.write(f"**Days Before Fault:** {'N/A' if days_before_fault is None else f'{days_before_fault:,.2f} days'}")
+            st.write(f"**Days Model:** {days_model_name}")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
         st.markdown('<div class="card">', unsafe_allow_html=True)
-        st.subheader("📋 Model Input Used")
+        st.subheader("📋 Tabular Model Input Used")
         st.dataframe(X, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
 

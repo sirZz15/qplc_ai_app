@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import json
 import joblib
 import gdown
 import numpy as np
@@ -64,6 +65,36 @@ MODEL_FILES = {
     "boiler": "boiler_bundle.joblib",
     "genset": "genset_bundle.joblib",
     "pellet": "pellet_bundle.joblib",
+}
+
+# =========================================================
+# Google Drive LSTM artifact IDs
+# Replace these with your actual Google Drive file IDs
+# =========================================================
+LSTM_FILE_IDS = {
+    "boiler": {
+        "model": "1Nax72-dQHkaHe8INin41C_4CB1xh6mUs",
+        "meta": "1J-nYgq9pZoRnQ03H9PyPd49UodCycRQD",
+        "scaler": "1oOwaVbDZmPf1-O94zccBieozt_iSCRsd",
+    },
+    "pellet": {
+        "model": "1mXQdu8WurUhhc6BuuGePfCaNVhb4FOfk",
+        "meta": "18Od5pYdW6c-pcSAgczk7D_rv0YhUGXB_",
+        "scaler": "1AyAMrD-arOm8kBDo4KWSBFwtSsOD0v92",
+    },
+}
+
+LSTM_FILES = {
+    "boiler": {
+        "model": "boiler_lstm_days_to_fault.keras",
+        "meta": "boiler_lstm_metadata.json",
+        "scaler": "boiler_lstm_scaler.npz",
+    },
+    "pellet": {
+        "model": "pellet_lstm_days_to_fault.keras",
+        "meta": "pellet_lstm_metadata.json",
+        "scaler": "pellet_lstm_scaler.npz",
+    },
 }
 
 
@@ -157,14 +188,10 @@ def clean_numeric_series(series: pd.Series) -> pd.Series:
     s = s.replace({"": np.nan, "nan": np.nan, "None": np.nan})
     return pd.to_numeric(s, errors="coerce")
 
+
 def clean_pellet_rows(df: pd.DataFrame, cond_col: str) -> pd.DataFrame:
-    """
-    Remove pellet rows that are just non-operating placeholders:
-    HOURS = 0, sensors = 0/blank, DAILY CONDITION blank.
-    """
     out = df.copy()
 
-    # Match actual pellet columns safely
     hours_col = find_matching_column(out, "HOURS")
     amp1_col = find_matching_column(out, "AMP1")
     amp2_col = find_matching_column(out, "AMP2")
@@ -193,12 +220,11 @@ def clean_pellet_rows(df: pd.DataFrame, cond_col: str) -> pd.DataFrame:
         zero_sensor_mask = pd.Series(True, index=out.index)
 
     blank_condition_mask = out[cond_col].eq("") | out[cond_col].eq("Normal")
-
-    # remove only clearly empty/non-operating rows
     drop_mask = zero_mask & zero_sensor_mask & blank_condition_mask
 
     out = out.loc[~drop_mask].copy().reset_index(drop=True)
     return out
+
 
 # =========================
 # Label engineering
@@ -379,7 +405,6 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
 
     out[cond_col] = out[cond_col].apply(normalize_condition_text)
 
-    # Pellet uses row-level HOURS
     if machine == "pellet":
         hours_col = find_matching_column(out, "HOURS")
         if hours_col is not None:
@@ -387,7 +412,6 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
         else:
             hrs = pd.Series(np.ones(len(out)), index=out.index)
 
-    # Boiler/genset use operating hours if available
     elif "OPERATING HOURS" in out.columns:
         hrs = clean_numeric_series(out["OPERATING HOURS"]).fillna(0.0)
     else:
@@ -413,6 +437,7 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
     out.loc[out["rul_hours"] < 0, "rul_hours"] = np.nan
 
     return out
+
 
 # =========================
 # Preprocessing
@@ -475,13 +500,11 @@ def load_machine_df(machine: str) -> pd.DataFrame:
     df["fault_type"] = df[cond_col].apply(extract_fault_type)
     df["fault_flag"] = df["fault_type"].apply(fault_flag_from_type)
 
-    # Convert likely numeric columns
     protected_cols = {cond_col, "condition_severity", "fault_type", "fault_flag"}
     for c in df.columns:
         if c in protected_cols:
             continue
 
-        # Keep pellet FEED TYPE as categorical
         if machine == "pellet" and normalize_col_name(c) == "FEED TYPE":
             df[c] = df[c].astype(str).replace({"nan": np.nan}).str.strip()
             continue
@@ -490,7 +513,6 @@ def load_machine_df(machine: str) -> pd.DataFrame:
         if s_num.notna().mean() >= 0.70:
             df[c] = s_num
 
-    # Pellet-specific cleaning
     if machine == "pellet":
         df = clean_pellet_rows(df, cond_col)
 
@@ -510,11 +532,9 @@ def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
         if c in reserved:
             continue
 
-        # Pellet: keep FEED TYPE categorical
         if machine == "pellet" and normalize_col_name(c) == "FEED TYPE":
             continue
 
-        # Pellet: exclude repeated daily OPERATING HOURS as ML feature
         if machine == "pellet" and normalize_col_name(c) == "OPERATING HOURS":
             continue
 
@@ -527,6 +547,7 @@ def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
         df = add_history_features(df, numeric_candidate_cols, history_steps=history_steps)
 
     return df
+
 
 # =========================
 # Model artifact helpers
@@ -563,6 +584,27 @@ def ensure_bundle_exists(machine: str) -> str:
         _download_from_gdrive(file_id, output_path)
 
     return output_path
+
+
+def ensure_lstm_artifacts_exist(machine: str) -> Dict[str, str]:
+    if machine not in LSTM_FILES:
+        raise ValueError(f"No LSTM config for machine: {machine}")
+
+    out_paths = {}
+    for part, filename in LSTM_FILES[machine].items():
+        output_path = os.path.join(MODEL_DIR, filename)
+        out_paths[part] = output_path
+
+        if not os.path.exists(output_path):
+            file_id = LSTM_FILE_IDS.get(machine, {}).get(part, "")
+            if not file_id or file_id.startswith("PASTE_"):
+                raise ValueError(
+                    f"Google Drive file ID for LSTM '{machine}:{part}' is not set. "
+                    f"Please update LSTM_FILE_IDS in maintenance_ml.py."
+                )
+            _download_from_gdrive(file_id, output_path)
+
+    return out_paths
 
 
 @st.cache_resource
