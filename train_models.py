@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import json
 import warnings
 from pathlib import Path
 from typing import Dict, Any, Optional, Tuple
@@ -35,7 +34,6 @@ from sklearn.ensemble import (
 )
 from sklearn.svm import SVC, SVR
 from sklearn.neighbors import KNeighborsRegressor
-from sklearn.preprocessing import StandardScaler
 
 from maintenance_ml import (
     MACHINES,
@@ -43,17 +41,10 @@ from maintenance_ml import (
     build_modeling_frame,
     build_preprocessor,
     save_bundle,
+    save_horizon_bundle,
     build_rul_target,
+    find_matching_column,
 )
-
-try:
-    import tensorflow as tf
-    from tensorflow.keras.models import Sequential
-    from tensorflow.keras.layers import LSTM, Dense, Dropout, Masking
-    from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
-    TF_AVAILABLE = True
-except Exception:
-    TF_AVAILABLE = False
 
 warnings.filterwarnings("ignore")
 
@@ -280,6 +271,85 @@ def get_regressors() -> Dict[str, Any]:
     return regs
 
 
+def get_horizon_classifiers() -> Dict[str, Any]:
+    models = {
+        "LogReg": LogisticRegression(
+            max_iter=5000,
+            class_weight="balanced",
+            solver="saga",
+            C=1.0,
+            n_jobs=-1,
+        ),
+        "RandomForest": RandomForestClassifier(
+            n_estimators=600,
+            random_state=42,
+            class_weight="balanced",
+            min_samples_leaf=2,
+            n_jobs=-1,
+        ),
+        "ExtraTrees": ExtraTreesClassifier(
+            n_estimators=800,
+            random_state=42,
+            class_weight="balanced",
+            min_samples_leaf=1,
+            n_jobs=-1,
+        ),
+        "GradBoost": GradientBoostingClassifier(random_state=42),
+        "SVM_RBF": SVC(
+            kernel="rbf",
+            probability=True,
+            class_weight="balanced",
+        ),
+    }
+
+    try:
+        from xgboost import XGBClassifier
+        models["XGBoost"] = XGBClassifier(
+            n_estimators=800,
+            learning_rate=0.03,
+            max_depth=5,
+            subsample=0.85,
+            colsample_bytree=0.85,
+            eval_metric="logloss",
+            random_state=42,
+        )
+    except Exception:
+        pass
+
+    try:
+        from lightgbm import LGBMClassifier
+        models["LightGBM"] = LGBMClassifier(
+            n_estimators=800,
+            learning_rate=0.03,
+            random_state=42,
+            verbose=-1,
+        )
+    except Exception:
+        pass
+
+    ensemble_estimators = [
+        ("et", ExtraTreesClassifier(
+            n_estimators=600,
+            random_state=42,
+            class_weight="balanced",
+            n_jobs=-1,
+        )),
+        ("rf", RandomForestClassifier(
+            n_estimators=500,
+            random_state=42,
+            class_weight="balanced",
+            n_jobs=-1,
+        )),
+        ("svm", SVC(kernel="rbf", probability=True, class_weight="balanced")),
+    ]
+    models["Ensemble_Voting"] = VotingClassifier(
+        estimators=ensemble_estimators,
+        voting="soft",
+    )
+
+    return models
+
+
 def safe_stratified_cv(y: pd.Series):
     min_class_count = y.value_counts().min()
     n_splits = min(5, int(min_class_count)) if pd.notna(min_class_count) else 0
@@ -468,35 +538,6 @@ def plot_feature_importance(
     plt.close()
 
 
-def plot_actual_vs_predicted(y_true: np.ndarray, y_pred: np.ndarray, title: str, save_path: str) -> None:
-    plt.figure(figsize=(7, 7))
-    plt.scatter(y_true, y_pred, alpha=0.7)
-    min_v = min(np.min(y_true), np.min(y_pred))
-    max_v = max(np.max(y_true), np.max(y_pred))
-    plt.plot([min_v, max_v], [min_v, max_v], linestyle="--")
-    plt.title(title, fontweight="bold")
-    plt.xlabel("Actual")
-    plt.ylabel("Predicted")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, bbox_inches="tight")
-    plt.close()
-
-
-def plot_residuals(y_true: np.ndarray, y_pred: np.ndarray, title: str, save_path: str) -> None:
-    residuals = y_true - y_pred
-    plt.figure(figsize=(8, 6))
-    plt.scatter(y_pred, residuals, alpha=0.7)
-    plt.axhline(0, linestyle="--")
-    plt.title(title, fontweight="bold")
-    plt.xlabel("Predicted")
-    plt.ylabel("Residual (Actual - Predicted)")
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(save_path, bbox_inches="tight")
-    plt.close()
-
-
 def get_excel_source_path() -> str:
     env_path = os.environ.get("QPLC_XLSX_PATH")
     if env_path and os.path.exists(env_path):
@@ -548,94 +589,61 @@ def is_fault_text(v: Any) -> bool:
     return any(k in s for k in abnormal_keywords)
 
 
-def read_raw_machine_sheet(machine: str) -> pd.DataFrame:
-    source_path = get_excel_source_path()
-    print(f"[LSTM DEBUG] Using Excel file: {source_path}")
+def aggregate_daily_for_horizon(machine: str) -> pd.DataFrame:
+    df = load_machine_df(machine).copy()
+    cfg = MACHINES[machine]
 
-    sheet_map = {
-        "boiler": "Boiler",
-        "genset": "Gen Set",
-        "pellet": "Pellet Mill",
-    }
-    sheet_name = sheet_map[machine]
+    time_key = cfg["time_key"]
+    cond_col = cfg["condition_col"]
 
-    df = pd.read_excel(source_path, sheet_name=sheet_name, header=0)
-    df.columns = [str(c).strip() for c in df.columns]
-    df = df.dropna(how="all").copy()
+    day_col = find_matching_column(df, time_key)
+    if day_col is None:
+        raise ValueError(f"Could not find time key '{time_key}' for machine '{machine}'")
 
-    rename_common = {
-        "DAILY CONDITION": "DAILY_CONDITION",
-    }
-    df = df.rename(columns=rename_common)
-
-    if "DAY" not in df.columns:
-        raise ValueError(f"'DAY' column not found in sheet: {sheet_name}. Columns found: {list(df.columns)}")
-
-    df["DAY"] = pd.to_numeric(df["DAY"], errors="coerce").ffill()
-    df = df.dropna(subset=["DAY"]).copy()
-    df["DAY"] = df["DAY"].astype(int)
-
-    print(f"[LSTM DEBUG] {machine} raw columns: {list(df.columns)}")
-    return df
-
-
-def aggregate_daily_for_lstm(machine: str) -> pd.DataFrame:
-    df = read_raw_machine_sheet(machine).copy()
+    cond_col_real = find_matching_column(df, cond_col)
+    if cond_col_real is None:
+        raise ValueError(f"Could not find condition column '{cond_col}' for machine '{machine}'")
 
     if machine == "boiler":
-        rename_map = {
-            "DAY": "DAY",
-            "BOILER WATER": "BOILER_WATER",
-            "BOILER MAIN STEAM PRESSURE": "MAIN_STEAM_PRESSURE",
-            "BOILER FUEL GAS": "FUEL_GAS_TEMP",
-            "BURNER FUEL PRESSURE": "BURNER_FUEL_PRESSURE",
-            "FEED WATER TANK": "FEED_WATER_TANK_LEVEL",
-            "FEED WATER TEMP": "FEED_WATER_TEMP",
-            "DAILY_CONDITION": "DAILY_CONDITION",
+        feature_targets = {
+            "BOILER_WATER": "BOILER WATER",
+            "MAIN_STEAM_PRESSURE": "BOILER MAIN STEAM PRESSURE",
+            "FUEL_GAS_TEMP": "BOILER FUEL GAS",
+            "BURNER_FUEL_PRESSURE": "BURNER FUEL PRESSURE",
+            "FEED_WATER_TANK_LEVEL": "FEED WATER TANK",
+            "FEED_WATER_TEMP": "FEED WATER TEMP",
         }
-        df = df.rename(columns=rename_map)
-
-        numeric_cols = [
-            "BOILER_WATER",
-            "MAIN_STEAM_PRESSURE",
-            "FUEL_GAS_TEMP",
-            "BURNER_FUEL_PRESSURE",
-            "FEED_WATER_TANK_LEVEL",
-            "FEED_WATER_TEMP",
-        ]
-
     elif machine == "pellet":
-        rename_map = {
-            "DAY": "DAY",
-            "AMP1 (100AMP)": "AMP1",
-            "AMP2 (100AMP)": "AMP2",
-            "US PRESS (4.5-8BARS)": "US_PRESS",
-            "DS PRESS (1.8-3BARS)": "DS_PRESS",
-            "FEEDER RATE (60HERTZ) - (%)": "FEEDER_RATE",
+        feature_targets = {
+            "AMP1": "AMP1",
+            "AMP2": "AMP2",
+            "US_PRESS": "US PRESS",
+            "DS_PRESS": "DS PRESS",
+            "FEEDER_RATE": "FEEDER RATE",
             "TEMPERATURE": "TEMPERATURE",
-            "DAILY_CONDITION": "DAILY_CONDITION",
         }
-        df = df.rename(columns=rename_map)
-
-        numeric_cols = [
-            "AMP1",
-            "AMP2",
-            "US_PRESS",
-            "DS_PRESS",
-            "FEEDER_RATE",
-            "TEMPERATURE",
-        ]
-
     else:
-        raise ValueError(f"Unsupported machine for LSTM daily aggregation: {machine}")
+        raise ValueError(f"Unsupported machine for horizon aggregation: {machine}")
+
+    rename_map = {day_col: "DAY", cond_col_real: "DAILY_CONDITION"}
+    numeric_cols = []
+
+    for new_name, target in feature_targets.items():
+        real_col = find_matching_column(df, target)
+        if real_col is not None:
+            rename_map[real_col] = new_name
+            numeric_cols.append(new_name)
+
+    df = df.rename(columns=rename_map).copy()
 
     required_cols = ["DAY", "DAILY_CONDITION"] + numeric_cols
     missing = [c for c in required_cols if c not in df.columns]
     if missing:
-        raise ValueError(
-            f"Missing expected columns for {machine}: {missing}. "
-            f"Available columns: {list(df.columns)}"
-        )
+        raise ValueError(f"Missing expected columns for {machine}: {missing}")
+
+    df["DAY"] = pd.to_numeric(df["DAY"], errors="coerce").ffill()
+    df = df.dropna(subset=["DAY"]).copy()
+    df["DAY"] = df["DAY"].astype(int)
 
     for c in numeric_cols:
         df[c] = pd.to_numeric(df[c], errors="coerce")
@@ -659,9 +667,8 @@ def aggregate_daily_for_lstm(machine: str) -> pd.DataFrame:
 
     std_cols = [c for c in daily.columns if c.endswith("_std")]
     for c in std_cols:
-        daily[c] = daily[c].fillna(0)
+        daily[c] = daily[c].fillna(0.0)
 
-    print(f"[LSTM DEBUG] {machine} daily columns: {list(daily.columns)}")
     return daily
 
 
@@ -686,223 +693,66 @@ def build_days_to_fault_target(daily_df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def make_lstm_sequences(
+def map_days_to_horizon_class(days: Any) -> Any:
+    if pd.isna(days):
+        return np.nan
+    d = float(days)
+    if d <= 10:
+        return "Risk"
+    return "Safe"
+
+
+def build_fault_horizon_class_target(daily_df: pd.DataFrame) -> pd.DataFrame:
+    df = build_days_to_fault_target(daily_df)
+    df["fault_horizon_class"] = df["days_to_fault"].apply(map_days_to_horizon_class)
+    return df
+
+
+def print_horizon_class_distribution(machine: str, y: pd.Series) -> None:
+    dist = y.value_counts(dropna=False).to_dict()
+    print(f"[HORIZON CLASS DISTRIBUTION] {machine}: {dist}")
+
+
+def make_horizon_tabular_sequences(
     df_daily: pd.DataFrame,
     feature_cols: list[str],
     seq_len: int = 7,
-) -> tuple[np.ndarray, np.ndarray, list[int], StandardScaler]:
+) -> tuple[pd.DataFrame, pd.Series, list[int]]:
     df = df_daily.copy().reset_index(drop=True)
+    df = df[df["fault_horizon_class"].notna()].reset_index(drop=True)
 
-    valid = df["days_to_fault"].notna()
-    df = df.loc[valid].reset_index(drop=True)
+    rows = []
+    targets = []
+    day_refs = []
 
-    if len(df) <= seq_len:
-        raise ValueError("Not enough daily rows to build LSTM sequences.")
+    if len(df) < seq_len:
+        raise ValueError("Not enough daily rows for horizon sequence generation.")
 
-    scaler = StandardScaler()
-    X_all = scaler.fit_transform(df[feature_cols].astype(float).values)
+    for i in range(seq_len - 1, len(df)):
+        window = df.iloc[i - seq_len + 1:i + 1].copy()
+        row = {}
 
-    X_seq, y_seq, day_refs = [], [], []
+        for step_idx in range(seq_len):
+            step = window.iloc[step_idx]
+            suffix = f"d{step_idx + 1}"
+            for col in feature_cols:
+                row[f"{col}__{suffix}"] = step[col]
 
-    for i in range(seq_len, len(df)):
-        X_seq.append(X_all[i - seq_len:i, :])
-        y_seq.append(float(df.loc[i, "days_to_fault"]))
+        current = window.iloc[-1]
+        oldest = window.iloc[0]
+        for col in feature_cols:
+            vals = window[col].astype(float).values
+            row[f"{col}__delta"] = float(current[col] - oldest[col])
+            row[f"{col}__wmean"] = float(np.mean(vals))
+            row[f"{col}__wstd"] = float(np.std(vals))
+
+        rows.append(row)
+        targets.append(df.loc[i, "fault_horizon_class"])
         day_refs.append(int(df.loc[i, "DAY"]))
 
-    return np.array(X_seq, dtype=np.float32), np.array(y_seq, dtype=np.float32), day_refs, scaler
-
-
-def build_lstm_regressor(input_shape: tuple[int, int]) -> Sequential:
-    model = Sequential([
-        Masking(mask_value=0.0, input_shape=input_shape),
-        LSTM(64, return_sequences=True),
-        Dropout(0.2),
-        LSTM(32),
-        Dropout(0.2),
-        Dense(16, activation="relu"),
-        Dense(1, activation="relu"),
-    ])
-
-    model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=1e-3),
-        loss="mse",
-        metrics=["mae"],
-    )
-    return model
-
-
-def train_lstm_days_to_fault(
-    machine: str,
-    results_dir: str,
-    seq_len: int = 7,
-    epochs: int = 100,
-    batch_size: int = 16,
-) -> Optional[Dict[str, Any]]:
-    if not TF_AVAILABLE:
-        print(f"[WARNING] TensorFlow is not installed. Skipping LSTM for {machine}.")
-        return None
-
-    if machine not in {"boiler", "pellet"}:
-        return None
-
-    daily = aggregate_daily_for_lstm(machine)
-    daily = build_days_to_fault_target(daily)
-
-    feature_cols = [
-        c for c in daily.columns
-        if c not in {"DAY", "fault_flag_binary", "days_to_fault"}
-        and pd.api.types.is_numeric_dtype(daily[c])
-    ]
-
-    usable = int(daily["days_to_fault"].notna().sum())
-    fault_days = int(daily["fault_flag_binary"].sum())
-
-    print(f"[LSTM DEBUG] {machine} unique days = {len(daily)}")
-    print(f"[LSTM DEBUG] {machine} fault days = {fault_days}")
-    print(f"[LSTM DEBUG] {machine} usable days_to_fault rows = {usable}")
-    print(f"[LSTM DEBUG] {machine} feature count = {len(feature_cols)}")
-
-    if len(feature_cols) == 0:
-        print(f"[WARNING] No valid numeric daily features for LSTM on {machine}.")
-        return None
-
-    if usable < (seq_len + 10):
-        print(f"[WARNING] Not enough valid daily data for LSTM on {machine}. Need more rows.")
-        return None
-
-    X, y, day_refs, scaler = make_lstm_sequences(daily, feature_cols, seq_len=seq_len)
-
-    split_idx = int(len(X) * 0.8)
-    if split_idx < 1 or len(X) - split_idx < 1:
-        print(f"[WARNING] Not enough sequences after split for {machine}.")
-        return None
-
-    X_train, X_test = X[:split_idx], X[split_idx:]
-    y_train, y_test = y[:split_idx], y[split_idx:]
-    day_test = day_refs[split_idx:]
-
-    model = build_lstm_regressor((X.shape[1], X.shape[2]))
-
-    callbacks = [
-        EarlyStopping(
-            monitor="val_loss",
-            patience=12,
-            restore_best_weights=True,
-            verbose=1,
-        ),
-        ReduceLROnPlateau(
-            monitor="val_loss",
-            factor=0.5,
-            patience=6,
-            min_lr=1e-5,
-            verbose=1,
-        ),
-    ]
-
-    history = model.fit(
-        X_train,
-        y_train,
-        validation_data=(X_test, y_test),
-        epochs=epochs,
-        batch_size=batch_size,
-        verbose=1,
-        callbacks=callbacks,
-        shuffle=False,
-    )
-
-    pred_test = model.predict(X_test, verbose=0).reshape(-1)
-    pred_test = np.maximum(pred_test, 0)
-
-    mae = float(mean_absolute_error(y_test, pred_test))
-    rmse = float(np.sqrt(mean_squared_error(y_test, pred_test)))
-    r2 = float(r2_score(y_test, pred_test))
-
-    machine_dir = os.path.join(results_dir, machine)
-    ensure_dir(machine_dir)
-
-    model_path = os.path.join(machine_dir, f"{machine}_lstm_days_to_fault.keras")
-    scaler_path = os.path.join(machine_dir, f"{machine}_lstm_scaler.npz")
-    meta_path = os.path.join(machine_dir, f"{machine}_lstm_metadata.json")
-    preds_path = os.path.join(machine_dir, f"{machine}_lstm_test_predictions.csv")
-    loss_plot_path = os.path.join(machine_dir, f"{machine}_lstm_training_loss.png")
-    avp_plot_path = os.path.join(machine_dir, f"{machine}_lstm_actual_vs_predicted_days.png")
-    residual_plot_path = os.path.join(machine_dir, f"{machine}_lstm_residuals_days.png")
-
-    model.save(model_path)
-
-    np.savez(
-        scaler_path,
-        mean_=scaler.mean_,
-        scale_=scaler.scale_,
-    )
-
-    with open(meta_path, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "machine": machine,
-                "seq_len": seq_len,
-                "feature_cols": feature_cols,
-                "target": "days_to_fault",
-                "metrics": {
-                    "mae_days": mae,
-                    "rmse_days": rmse,
-                    "r2": r2,
-                },
-                "debug": {
-                    "unique_days": int(len(daily)),
-                    "fault_days": fault_days,
-                    "usable_days_to_fault_rows": usable,
-                },
-            },
-            f,
-            indent=2,
-        )
-
-    pd.DataFrame({
-        "DAY": day_test,
-        "actual_days_to_fault": y_test,
-        "predicted_days_to_fault": pred_test,
-    }).to_csv(preds_path, index=False)
-
-    plt.figure(figsize=(8, 5))
-    plt.plot(history.history["loss"], label="train_loss")
-    plt.plot(history.history["val_loss"], label="val_loss")
-    plt.title(f"{machine.upper()} - LSTM Training Loss", fontweight="bold")
-    plt.xlabel("Epoch")
-    plt.ylabel("MSE Loss")
-    plt.legend()
-    plt.grid(alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(loss_plot_path, bbox_inches="tight")
-    plt.close()
-
-    plot_actual_vs_predicted(
-        y_true=y_test,
-        y_pred=pred_test,
-        title=f"{machine.upper()} - LSTM Actual vs Predicted Days to Fault",
-        save_path=avp_plot_path,
-    )
-
-    plot_residuals(
-        y_true=y_test,
-        y_pred=pred_test,
-        title=f"{machine.upper()} - LSTM Residual Plot (Days to Fault)",
-        save_path=residual_plot_path,
-    )
-
-    return {
-        "machine": machine,
-        "model_type": "LSTM_days_to_fault",
-        "model_path": model_path,
-        "scaler_path": scaler_path,
-        "metadata_path": meta_path,
-        "predictions_path": preds_path,
-        "feature_cols": feature_cols,
-        "seq_len": seq_len,
-        "mae_days": mae,
-        "rmse_days": rmse,
-        "r2": r2,
-    }
+    X = pd.DataFrame(rows)
+    y = pd.Series(targets, name="fault_horizon_class")
+    return X, y, day_refs
 
 
 def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None:
@@ -995,45 +845,53 @@ def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None
             ascending=True,
         )
 
-        best_model_name = bundle["rul"]["best_model"]
-        best_item = next((x for x in leader if x["model"] == best_model_name), None)
 
-        if best_item is not None:
-            y_true = np.array(best_item["y_true"])
-            y_pred = np.array(best_item["y_pred"])
-
-            plot_actual_vs_predicted(
-                y_true,
-                y_pred,
-                title=f"{machine.upper()} - Actual vs Predicted RUL ({best_model_name})",
-                save_path=os.path.join(machine_dir, f"{machine}_rul_actual_vs_predicted.png"),
-            )
-
-            plot_residuals(
-                y_true,
-                y_pred,
-                title=f"{machine.upper()} - RUL Residual Plot ({best_model_name})",
-                save_path=os.path.join(machine_dir, f"{machine}_rul_residuals.png"),
-            )
-
-            pipe = best_item.get("fitted_pipeline")
-            if pipe is not None:
-                feature_names, importances = get_feature_importance_from_pipeline(pipe)
-                if feature_names is not None and importances is not None:
-                    plot_feature_importance(
-                        feature_names,
-                        importances,
-                        title=f"{machine.upper()} - RUL Feature Importance ({best_model_name})",
-                        save_path=os.path.join(machine_dir, f"{machine}_rul_feature_importance.png"),
-                        top_n=15,
-                    )
-
-
-def save_lstm_summary(all_lstm_rows: list[dict], results_dir: str) -> None:
-    if not all_lstm_rows:
+def save_horizon_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None:
+    if not bundle or not bundle.get("leaderboard"):
         return
-    df = pd.DataFrame(all_lstm_rows)
-    df.to_csv(os.path.join(results_dir, "deep_learning_lstm_summary.csv"), index=False)
+
+    machine_dir = os.path.join(results_dir, machine)
+    ensure_dir(machine_dir)
+
+    rows = []
+    for item in bundle["leaderboard"]:
+        rows.append({
+            "model": item["model"],
+            "f1_macro": item["f1_macro"],
+            "accuracy": item["accuracy"],
+        })
+
+    df = pd.DataFrame(rows).sort_values("f1_macro", ascending=False).reset_index(drop=True)
+    df.insert(0, "rank", np.arange(1, len(df) + 1))
+    df.to_csv(os.path.join(machine_dir, f"{machine}_fault_horizon_leaderboard.csv"), index=False)
+
+    plot_bar_ranking(
+        df,
+        x_col="model",
+        y_col="f1_macro",
+        title=f"{machine.upper()} - Fault Horizon Classifier Comparison",
+        ylabel="F1 Macro",
+        save_path=os.path.join(machine_dir, f"{machine}_fault_horizon_f1_ranking.png"),
+        ascending=False,
+    )
+
+    best_name = bundle["best_model"]
+    best_item = next((x for x in bundle["leaderboard"] if x["model"] == best_name), None)
+    if best_item is not None:
+        labels = best_item["labels"]
+        cm = np.array(best_item["confusion_matrix"])
+
+        plot_confusion_matrix(
+            cm,
+            labels,
+            title=f"{machine.upper()} - Fault Horizon Confusion Matrix ({best_name})",
+            save_path=os.path.join(machine_dir, f"{machine}_fault_horizon_confusion_matrix.png"),
+        )
+
+        save_classification_report_table(
+            best_item["classification_report"],
+            os.path.join(machine_dir, f"{machine}_fault_horizon_classification_report.csv"),
+        )
 
 
 def train_machine(machine: str) -> Dict[str, Any]:
@@ -1185,12 +1043,82 @@ def train_machine(machine: str) -> Dict[str, Any]:
     return bundle
 
 
+def train_fault_horizon_classifier(
+    machine: str,
+    seq_len: int = 7,
+) -> Optional[Dict[str, Any]]:
+    if machine not in {"boiler", "pellet"}:
+        return None
+
+    daily = aggregate_daily_for_horizon(machine)
+    daily = build_fault_horizon_class_target(daily)
+
+    feature_cols = [
+        c for c in daily.columns
+        if c not in {"DAY", "fault_flag_binary", "days_to_fault", "fault_horizon_class"}
+        and pd.api.types.is_numeric_dtype(daily[c])
+    ]
+
+    usable = int(daily["fault_horizon_class"].notna().sum())
+    if len(feature_cols) == 0 or usable < (seq_len + 10):
+        print(f"[WARNING] Not enough valid data for horizon classification on {machine}.")
+        return None
+
+    Xh, yh, _ = make_horizon_tabular_sequences(daily, feature_cols, seq_len=seq_len)
+
+    print_horizon_class_distribution(machine, yh)
+
+    if yh.nunique() < 2:
+        print(f"[WARNING] Horizon target for {machine} has fewer than 2 classes.")
+        return None
+
+    models = get_horizon_classifiers()
+    pre, _, _ = build_preprocessor(Xh)
+
+    results = []
+    pipes = {}
+
+    for name, model in models.items():
+        pipe = Pipeline([("pre", pre), ("model", model)])
+        try:
+            r = evaluate_classifier(name, pipe, Xh, yh)
+            results.append(r)
+            pipes[name] = pipe
+            print(f"[HORIZON] {machine} - {name}: F1={r['f1_macro']:.3f}, ACC={r['accuracy']:.3f}")
+        except Exception as e:
+            print(f"[WARNING] Skipping horizon model '{name}' for {machine}: {e}")
+
+    if not results:
+        return None
+
+    leader = sorted(results, key=lambda d: (d["f1_macro"], d["accuracy"]), reverse=True)
+    best_model = leader[0]["model"]
+    pipes[best_model].fit(Xh, yh)
+
+    bundle = {
+        "machine": machine,
+        "target": "fault_horizon_class",
+        "horizon_definition": {
+            "Risk": "0-10 days",
+            "Safe": ">10 days",
+        },
+        "seq_len": seq_len,
+        "feature_columns": list(Xh.columns),
+        "class_labels": sorted(yh.astype(str).unique().tolist()),
+        "best_model": best_model,
+        "pipelines": pipes,
+        "leaderboard": leader,
+    }
+
+    save_horizon_bundle(machine, bundle)
+    return bundle
+
+
 def main() -> None:
     results_dir = "results"
     ensure_dir(results_dir)
 
     summary_rows = []
-    lstm_rows = []
 
     for m in MACHINES.keys():
         print(f"Training: {m}")
@@ -1200,7 +1128,10 @@ def main() -> None:
         print(f"Saved bundle for: {m}")
         print("Best severity:", bundle["severity"]["best_model"])
         print("Best fault flag:", bundle["fault_flag"]["best_model"])
-        print("Best fault type:", bundle["fault_type"]["best_model"] if bundle["fault_type"]["best_model"] else "rule_based")
+        print(
+            "Best fault type:",
+            bundle["fault_type"]["best_model"] if bundle["fault_type"]["best_model"] else "rule_based"
+        )
         print("Best RUL:", bundle["rul"]["best_model"] if bundle["rul"] else "N/A")
         print("Final feature columns used:")
         print(bundle["feature_columns"])
@@ -1218,30 +1149,23 @@ def main() -> None:
 
         if m in {"boiler", "pellet"}:
             try:
-                lstm_result = train_lstm_days_to_fault(
+                horizon_bundle = train_fault_horizon_classifier(
                     machine=m,
-                    results_dir=results_dir,
                     seq_len=7,
-                    epochs=100,
-                    batch_size=16,
                 )
-                if lstm_result is not None:
-                    lstm_rows.append(lstm_result)
-                    print(
-                        f"[LSTM] {m} -> "
-                        f"MAE(days): {lstm_result['mae_days']:.3f}, "
-                        f"RMSE(days): {lstm_result['rmse_days']:.3f}, "
-                        f"R2: {lstm_result['r2']:.3f}"
-                    )
+                if horizon_bundle is not None:
+                    save_horizon_results(horizon_bundle, m, results_dir)
+                    print(f"[BEST HORIZON] {m}: {horizon_bundle['best_model']}")
+                    print(f"[HORIZON CLASSES] {m}: {horizon_bundle['class_labels']}")
+                    print(f"[HORIZON DEFINITION] {m}: {horizon_bundle['horizon_definition']}")
+                    print("-" * 50)
             except Exception as e:
-                print(f"[WARNING] LSTM training failed for {m}: {e}")
+                print(f"[WARNING] Horizon classifier training failed for {m}: {e}")
 
     pd.DataFrame(summary_rows).to_csv(
         os.path.join(results_dir, "overall_best_models_summary.csv"),
         index=False
     )
-
-    save_lstm_summary(lstm_rows, results_dir)
 
 
 if __name__ == "__main__":

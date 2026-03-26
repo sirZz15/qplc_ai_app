@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import re
-import json
 import joblib
 import gdown
 import numpy as np
@@ -68,33 +67,16 @@ MODEL_FILES = {
 }
 
 # =========================================================
-# Google Drive LSTM artifact IDs
-# Replace these with your actual Google Drive file IDs
+# Google Drive horizon model IDs (tabular classifier)
 # =========================================================
-LSTM_FILE_IDS = {
-    "boiler": {
-        "model": "1Nax72-dQHkaHe8INin41C_4CB1xh6mUs",
-        "meta": "1J-nYgq9pZoRnQ03H9PyPd49UodCycRQD",
-        "scaler": "1oOwaVbDZmPf1-O94zccBieozt_iSCRsd",
-    },
-    "pellet": {
-        "model": "1mXQdu8WurUhhc6BuuGePfCaNVhb4FOfk",
-        "meta": "18Od5pYdW6c-pcSAgczk7D_rv0YhUGXB_",
-        "scaler": "1AyAMrD-arOm8kBDo4KWSBFwtSsOD0v92",
-    },
+HORIZON_MODEL_FILE_IDS = {
+    "boiler": "1tJVR1e7AEAqUUxG3wyMI4tsNzkDuPp_V",
+    "pellet": "1XITgMJEiRNIzQContIcWJ-QHqL9TOnTX",
 }
 
-LSTM_FILES = {
-    "boiler": {
-        "model": "boiler_lstm_days_to_fault.keras",
-        "meta": "boiler_lstm_metadata.json",
-        "scaler": "boiler_lstm_scaler.npz",
-    },
-    "pellet": {
-        "model": "pellet_lstm_days_to_fault.keras",
-        "meta": "pellet_lstm_metadata.json",
-        "scaler": "pellet_lstm_scaler.npz",
-    },
+HORIZON_MODEL_FILES = {
+    "boiler": "boiler_horizon_bundle.joblib",
+    "pellet": "pellet_horizon_bundle.joblib",
 }
 
 
@@ -127,27 +109,37 @@ def parse_merged_header_sheet(xlsx_path: str, sheet: str) -> pd.DataFrame:
     if header_idx is None:
         header_idx = 0
 
-    h1 = raw.iloc[header_idx].copy()
-    h2 = raw.iloc[header_idx + 1].copy() if header_idx + 1 < len(raw) else pd.Series([""] * len(h1))
+    h1 = raw.iloc[header_idx].fillna("").astype(str).str.strip()
+    h2 = raw.iloc[header_idx + 1].fillna("").astype(str).str.strip() if header_idx + 1 < len(raw) else pd.Series([""] * len(h1))
 
-    group = h1.ffill().bfill()
-    sub = h2.fillna("")
+    # If second row looks like real data, do not use it as header
+    h2_numeric_ratio = pd.to_numeric(h2, errors="coerce").notna().mean()
+    use_two_header_rows = h2_numeric_ratio < 0.40
 
     cols = []
-    for g, s in zip(group, sub):
-        g = "" if pd.isna(g) else str(g).strip()
-        s = str(s).strip()
-        if s and g and s != g:
-            col = f"{g} - {s}"
-        elif g:
-            col = g
-        elif s:
-            col = s
-        else:
-            col = "col"
-        cols.append(col)
+    if use_two_header_rows:
+        group = h1.replace("", np.nan).ffill().bfill()
+        sub = h2
 
-    data = raw.iloc[header_idx + 2:].copy()
+        for g, s in zip(group, sub):
+            g = "" if pd.isna(g) else str(g).strip()
+            s = str(s).strip()
+            if s and g and s != g:
+                col = f"{g} - {s}"
+            elif g:
+                col = g
+            elif s:
+                col = s
+            else:
+                col = "col"
+            cols.append(col)
+
+        data_start = header_idx + 2
+    else:
+        cols = [c if c else "col" for c in h1.tolist()]
+        data_start = header_idx + 1
+
+    data = raw.iloc[data_start:].copy()
     data.columns = _make_unique(cols)
     data = data.dropna(how="all").reset_index(drop=True)
     data = data.loc[:, [c for c in data.columns if c and c != "col"]]
@@ -411,7 +403,6 @@ def build_rul_target(df: pd.DataFrame, machine: str, time_key: str, cond_col: st
             hrs = clean_numeric_series(out[hours_col]).fillna(0.0)
         else:
             hrs = pd.Series(np.ones(len(out)), index=out.index)
-
     elif "OPERATING HOURS" in out.columns:
         hrs = clean_numeric_series(out["OPERATING HOURS"]).fillna(0.0)
     else:
@@ -586,30 +577,46 @@ def ensure_bundle_exists(machine: str) -> str:
     return output_path
 
 
-def ensure_lstm_artifacts_exist(machine: str) -> Dict[str, str]:
-    if machine not in LSTM_FILES:
-        raise ValueError(f"No LSTM config for machine: {machine}")
+def horizon_artifact_path(machine: str) -> str:
+    return os.path.join(MODEL_DIR, HORIZON_MODEL_FILES[machine])
 
-    out_paths = {}
-    for part, filename in LSTM_FILES[machine].items():
-        output_path = os.path.join(MODEL_DIR, filename)
-        out_paths[part] = output_path
 
-        if not os.path.exists(output_path):
-            file_id = LSTM_FILE_IDS.get(machine, {}).get(part, "")
-            if not file_id or file_id.startswith("PASTE_"):
-                raise ValueError(
-                    f"Google Drive file ID for LSTM '{machine}:{part}' is not set. "
-                    f"Please update LSTM_FILE_IDS in maintenance_ml.py."
-                )
-            _download_from_gdrive(file_id, output_path)
+def save_horizon_bundle(machine: str, bundle: Dict[str, Any]) -> None:
+    joblib.dump(bundle, horizon_artifact_path(machine))
 
-    return out_paths
+
+def ensure_horizon_bundle_exists(machine: str) -> str:
+    if machine not in HORIZON_MODEL_FILES:
+        raise ValueError(f"No horizon model configured for machine: {machine}")
+
+    if machine not in HORIZON_MODEL_FILE_IDS:
+        raise ValueError(f"No Google Drive horizon file ID configured for machine: {machine}")
+
+    output_path = horizon_artifact_path(machine)
+
+    if not os.path.exists(output_path):
+        file_id = HORIZON_MODEL_FILE_IDS[machine]
+        if not file_id or file_id.startswith("PASTE_"):
+            raise ValueError(
+                f"Google Drive file ID for horizon model '{machine}' is not set. "
+                f"Please update HORIZON_MODEL_FILE_IDS in maintenance_ml.py."
+            )
+        _download_from_gdrive(file_id, output_path)
+
+    return output_path
 
 
 @st.cache_resource
 def load_bundle(machine: str) -> Dict[str, Any]:
     p = ensure_bundle_exists(machine)
+    if not os.path.exists(p):
+        return {}
+    return joblib.load(p)
+
+
+@st.cache_resource
+def load_horizon_bundle(machine: str) -> Dict[str, Any]:
+    p = ensure_horizon_bundle_exists(machine)
     if not os.path.exists(p):
         return {}
     return joblib.load(p)
@@ -660,7 +667,10 @@ def build_history_input_frame(
         df = add_history_features(df, numeric_candidate_cols, history_steps=3)
 
     X = df.iloc[[-1]].copy()
-    X = X.drop(columns=[c for c in [cond_col, time_key, "condition_severity", "fault_type", "fault_flag"] if c in X.columns], errors="ignore")
+    X = X.drop(
+        columns=[c for c in [cond_col, time_key, "condition_severity", "fault_type", "fault_flag"] if c in X.columns],
+        errors="ignore"
+    )
 
     trained_cols = bundle["feature_columns"]
     for c in trained_cols:
@@ -740,7 +750,6 @@ def infer_boiler_fault_type_rules(history_rows: List[Dict[str, Any]]) -> str:
     fw_tank_d = delta(fw_tank_col)
 
     last = df.iloc[-1]
-
     steam_now = pd.to_numeric(last.get(steam_col, np.nan), errors="coerce")
     fuel_temp_now = pd.to_numeric(last.get(fuel_temp_col, np.nan), errors="coerce")
     fuel_press_now = pd.to_numeric(last.get(fuel_press_col, np.nan), errors="coerce")

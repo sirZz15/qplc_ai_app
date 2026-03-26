@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import re
-import json
 from typing import Dict, Any, List, Optional
 
 import numpy as np
@@ -11,19 +10,13 @@ import streamlit as st
 from maintenance_ml import (
     MACHINES,
     load_bundle,
+    load_horizon_bundle,
     load_machine_df,
     suggest_fix,
     build_history_input_frame,
     infer_boiler_fault_type_rules,
     infer_genset_fault_type_rules,
-    ensure_lstm_artifacts_exist,
 )
-
-try:
-    from tensorflow.keras.models import load_model
-    TF_APP_AVAILABLE = True
-except Exception:
-    TF_APP_AVAILABLE = False
 
 st.set_page_config(
     page_title="QPLC AI Predictive Maintenance Dashboard",
@@ -183,6 +176,14 @@ def badge_class(condition: str) -> str:
     if condition == "Trending to Fault":
         return "badge badge-mid"
     return "badge badge-bad"
+
+
+def horizon_badge_class(label: str) -> str:
+    if label == "Safe":
+        return "badge badge-ok"
+    if label == "Risk":
+        return "badge badge-bad"
+    return "badge"
 
 
 def render_metric_card(label: str, value_html: str, meta: str):
@@ -422,39 +423,6 @@ def final_machine_condition(sev_pred: str, ff_pred: str) -> str:
     return "Normal"
 
 
-# =========================================================
-# LSTM helpers
-# =========================================================
-@st.cache_resource
-def load_lstm_artifacts(machine: str) -> Optional[Dict[str, Any]]:
-    if not TF_APP_AVAILABLE:
-        return None
-
-    if machine not in {"boiler", "pellet"}:
-        return None
-
-    try:
-        paths = ensure_lstm_artifacts_exist(machine)
-    except Exception:
-        return None
-
-    model = load_model(paths["model"])
-
-    with open(paths["meta"], "r", encoding="utf-8") as f:
-        metadata = json.load(f)
-
-    scaler_npz = np.load(paths["scaler"])
-    scaler_mean = scaler_npz["mean_"]
-    scaler_scale = scaler_npz["scale_"]
-
-    return {
-        "model": model,
-        "metadata": metadata,
-        "scaler_mean": scaler_mean,
-        "scaler_scale": scaler_scale,
-    }
-
-
 def _safe_float(v: Any) -> float:
     try:
         return float(v)
@@ -462,72 +430,144 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
-def build_lstm_sequence_from_inputs(machine: str, input_rows: List[Dict[str, Any]], lstm_meta: Dict[str, Any]) -> np.ndarray:
-    feature_cols = lstm_meta["metadata"]["feature_cols"]
-    seq_len = int(lstm_meta["metadata"]["seq_len"])
+def build_horizon_input_frame(machine: str, input_rows: List[Dict[str, Any]], horizon_bundle: Dict[str, Any]) -> pd.DataFrame:
+    seq_len = int(horizon_bundle.get("seq_len", 7))
+    trained_cols = horizon_bundle["feature_columns"]
 
     if len(input_rows) != seq_len:
-        raise ValueError(f"LSTM expects {seq_len} rows, but app collected {len(input_rows)} rows.")
+        raise ValueError(f"Horizon model expects {seq_len} rows, but received {len(input_rows)} rows.")
 
-    row_feature_maps = []
-
+    rows = []
     for row in input_rows:
         if machine == "boiler":
             base_map = {
-                "BOILER_WATER": _safe_float(row.get("BOILER WATER", 0.0)),
-                "MAIN_STEAM_PRESSURE": _safe_float(row.get("BOILER MAIN STEAM PRESSURE", 0.0)),
-                "FUEL_GAS_TEMP": _safe_float(row.get("BOILER FUEL GAS", 0.0)),
-                "BURNER_FUEL_PRESSURE": _safe_float(row.get("BURNER FUEL PRESSURE", 0.0)),
-                "FEED_WATER_TANK_LEVEL": _safe_float(row.get("FEED WATER TANK", 0.0)),
-                "FEED_WATER_TEMP": _safe_float(row.get("FEED WATER TEMP", 0.0)),
+                "BOILER_WATER_mean": _safe_float(row.get("BOILER WATER", 0.0)),
+                "BOILER_WATER_min": _safe_float(row.get("BOILER WATER", 0.0)),
+                "BOILER_WATER_max": _safe_float(row.get("BOILER WATER", 0.0)),
+                "BOILER_WATER_std": 0.0,
+                "BOILER_WATER_last": _safe_float(row.get("BOILER WATER", 0.0)),
+
+                "MAIN_STEAM_PRESSURE_mean": _safe_float(row.get("BOILER MAIN STEAM PRESSURE", 0.0)),
+                "MAIN_STEAM_PRESSURE_min": _safe_float(row.get("BOILER MAIN STEAM PRESSURE", 0.0)),
+                "MAIN_STEAM_PRESSURE_max": _safe_float(row.get("BOILER MAIN STEAM PRESSURE", 0.0)),
+                "MAIN_STEAM_PRESSURE_std": 0.0,
+                "MAIN_STEAM_PRESSURE_last": _safe_float(row.get("BOILER MAIN STEAM PRESSURE", 0.0)),
+
+                "FUEL_GAS_TEMP_mean": _safe_float(row.get("BOILER FUEL GAS", 0.0)),
+                "FUEL_GAS_TEMP_min": _safe_float(row.get("BOILER FUEL GAS", 0.0)),
+                "FUEL_GAS_TEMP_max": _safe_float(row.get("BOILER FUEL GAS", 0.0)),
+                "FUEL_GAS_TEMP_std": 0.0,
+                "FUEL_GAS_TEMP_last": _safe_float(row.get("BOILER FUEL GAS", 0.0)),
+
+                "BURNER_FUEL_PRESSURE_mean": _safe_float(row.get("BURNER FUEL PRESSURE", 0.0)),
+                "BURNER_FUEL_PRESSURE_min": _safe_float(row.get("BURNER FUEL PRESSURE", 0.0)),
+                "BURNER_FUEL_PRESSURE_max": _safe_float(row.get("BURNER FUEL PRESSURE", 0.0)),
+                "BURNER_FUEL_PRESSURE_std": 0.0,
+                "BURNER_FUEL_PRESSURE_last": _safe_float(row.get("BURNER FUEL PRESSURE", 0.0)),
+
+                "FEED_WATER_TANK_LEVEL_mean": _safe_float(row.get("FEED WATER TANK", 0.0)),
+                "FEED_WATER_TANK_LEVEL_min": _safe_float(row.get("FEED WATER TANK", 0.0)),
+                "FEED_WATER_TANK_LEVEL_max": _safe_float(row.get("FEED WATER TANK", 0.0)),
+                "FEED_WATER_TANK_LEVEL_std": 0.0,
+                "FEED_WATER_TANK_LEVEL_last": _safe_float(row.get("FEED WATER TANK", 0.0)),
+
+                "FEED_WATER_TEMP_mean": _safe_float(row.get("FEED WATER TEMP", 0.0)),
+                "FEED_WATER_TEMP_min": _safe_float(row.get("FEED WATER TEMP", 0.0)),
+                "FEED_WATER_TEMP_max": _safe_float(row.get("FEED WATER TEMP", 0.0)),
+                "FEED_WATER_TEMP_std": 0.0,
+                "FEED_WATER_TEMP_last": _safe_float(row.get("FEED WATER TEMP", 0.0)),
             }
         elif machine == "pellet":
             base_map = {
-                "AMP1": _safe_float(row.get("AMP1 (100AMP)", 0.0)),
-                "AMP2": _safe_float(row.get("AMP2 (100AMP)", 0.0)),
-                "US_PRESS": _safe_float(row.get("US PRESS (4.5-8BARS)", 0.0)),
-                "DS_PRESS": _safe_float(row.get("DS PRESS (1.8-3BARS)", 0.0)),
-                "FEEDER_RATE": _safe_float(row.get("FEEDER RATE (60HERTZ) - (%)", 0.0)),
-                "TEMPERATURE": _safe_float(row.get("TEMPERATURE", 0.0)),
+                "AMP1_mean": _safe_float(row.get("AMP1 (100AMP)", 0.0)),
+                "AMP1_min": _safe_float(row.get("AMP1 (100AMP)", 0.0)),
+                "AMP1_max": _safe_float(row.get("AMP1 (100AMP)", 0.0)),
+                "AMP1_std": 0.0,
+                "AMP1_last": _safe_float(row.get("AMP1 (100AMP)", 0.0)),
+
+                "AMP2_mean": _safe_float(row.get("AMP2 (100AMP)", 0.0)),
+                "AMP2_min": _safe_float(row.get("AMP2 (100AMP)", 0.0)),
+                "AMP2_max": _safe_float(row.get("AMP2 (100AMP)", 0.0)),
+                "AMP2_std": 0.0,
+                "AMP2_last": _safe_float(row.get("AMP2 (100AMP)", 0.0)),
+
+                "US_PRESS_mean": _safe_float(row.get("US PRESS (4.5-8BARS)", 0.0)),
+                "US_PRESS_min": _safe_float(row.get("US PRESS (4.5-8BARS)", 0.0)),
+                "US_PRESS_max": _safe_float(row.get("US PRESS (4.5-8BARS)", 0.0)),
+                "US_PRESS_std": 0.0,
+                "US_PRESS_last": _safe_float(row.get("US PRESS (4.5-8BARS)", 0.0)),
+
+                "DS_PRESS_mean": _safe_float(row.get("DS PRESS (1.8-3BARS)", 0.0)),
+                "DS_PRESS_min": _safe_float(row.get("DS PRESS (1.8-3BARS)", 0.0)),
+                "DS_PRESS_max": _safe_float(row.get("DS PRESS (1.8-3BARS)", 0.0)),
+                "DS_PRESS_std": 0.0,
+                "DS_PRESS_last": _safe_float(row.get("DS PRESS (1.8-3BARS)", 0.0)),
+
+                "FEEDER_RATE_mean": _safe_float(row.get("FEEDER RATE (60HERTZ) - (%)", 0.0)),
+                "FEEDER_RATE_min": _safe_float(row.get("FEEDER RATE (60HERTZ) - (%)", 0.0)),
+                "FEEDER_RATE_max": _safe_float(row.get("FEEDER RATE (60HERTZ) - (%)", 0.0)),
+                "FEEDER_RATE_std": 0.0,
+                "FEEDER_RATE_last": _safe_float(row.get("FEEDER RATE (60HERTZ) - (%)", 0.0)),
+
+                "TEMPERATURE_mean": _safe_float(row.get("TEMPERATURE", 0.0)),
+                "TEMPERATURE_min": _safe_float(row.get("TEMPERATURE", 0.0)),
+                "TEMPERATURE_max": _safe_float(row.get("TEMPERATURE", 0.0)),
+                "TEMPERATURE_std": 0.0,
+                "TEMPERATURE_last": _safe_float(row.get("TEMPERATURE", 0.0)),
             }
         else:
-            raise ValueError(f"LSTM not supported for machine: {machine}")
+            raise ValueError(f"Horizon model not supported for machine: {machine}")
 
-        expanded = {}
-        for k, v in base_map.items():
-            expanded[f"{k}_mean"] = v
-            expanded[f"{k}_min"] = v
-            expanded[f"{k}_max"] = v
-            expanded[f"{k}_std"] = 0.0
-            expanded[f"{k}_last"] = v
+        rows.append(base_map)
 
-        row_vector = [expanded.get(col, 0.0) for col in feature_cols]
-        row_feature_maps.append(row_vector)
+    X_row = {}
+    keys = list(rows[0].keys())
 
-    X = np.array(row_feature_maps, dtype=np.float32)
+    for step_idx in range(seq_len):
+        suffix = f"d{step_idx + 1}"
+        step = rows[step_idx]
+        for col, val in step.items():
+            X_row[f"{col}__{suffix}"] = val
 
-    mean_ = np.array(lstm_meta["scaler_mean"], dtype=np.float32)
-    scale_ = np.array(lstm_meta["scaler_scale"], dtype=np.float32)
-    scale_ = np.where(scale_ == 0, 1.0, scale_)
+    for base_col in keys:
+        series_vals = [r[base_col] for r in rows]
+        X_row[f"{base_col}__delta"] = float(series_vals[-1] - series_vals[0])
+        X_row[f"{base_col}__wmean"] = float(np.mean(series_vals))
+        X_row[f"{base_col}__wstd"] = float(np.std(series_vals))
 
-    X = (X - mean_) / scale_
-    X = np.expand_dims(X, axis=0)
+    Xh = pd.DataFrame([X_row])
 
-    return X
+    for c in trained_cols:
+        if c not in Xh.columns:
+            Xh[c] = np.nan
+
+    Xh = Xh[trained_cols].copy()
+    return Xh
 
 
-def predict_days_to_fault_lstm(machine: str, input_rows: List[Dict[str, Any]]) -> tuple[Optional[float], str]:
-    artifacts = load_lstm_artifacts(machine)
-    if artifacts is None:
-        return None, "LSTM model not available"
+def predict_fault_horizon(machine: str, input_rows: List[Dict[str, Any]]) -> tuple[Optional[str], Optional[float], str]:
+    if machine not in {"boiler", "pellet"}:
+        return None, None, "Not applicable"
+
+    horizon_bundle = load_horizon_bundle(machine)
+    if not horizon_bundle:
+        return None, None, "Horizon model not available"
 
     try:
-        X_lstm = build_lstm_sequence_from_inputs(machine, input_rows, artifacts)
-        pred = artifacts["model"].predict(X_lstm, verbose=0).reshape(-1)[0]
-        pred = max(float(pred), 0.0)
-        return pred, f"LSTM seq_len={artifacts['metadata']['seq_len']}"
+        best_name = horizon_bundle["best_model"]
+        pipe = horizon_bundle["pipelines"][best_name]
+        Xh = build_horizon_input_frame(machine, input_rows, horizon_bundle)
+
+        pred = str(pipe.predict(Xh)[0])
+
+        conf = None
+        if hasattr(pipe, "predict_proba"):
+            prob = pipe.predict_proba(Xh)[0]
+            conf = float(np.max(prob))
+
+        return pred, conf, best_name
     except Exception as e:
-        return None, f"LSTM unavailable: {e}"
+        return None, None, f"Horizon prediction unavailable: {e}"
 
 
 # =========================================================
@@ -538,7 +578,7 @@ st.markdown(
     <div class="hero">
         <div class="big-title">🛠️ QPLC AI Predictive Maintenance Dashboard</div>
         <div class="subtle">
-            Predict machine condition, fault type, and days before fault.
+            Predict machine condition, fault type, and fault horizon risk.
         </div>
     </div>
     """,
@@ -562,7 +602,6 @@ if not bundle:
     st.stop()
 
 cfg = MACHINES[machine]
-
 history_steps = 7 if machine in {"boiler", "pellet"} else 1
 
 st.sidebar.markdown("---")
@@ -608,12 +647,11 @@ with ctop2:
         unsafe_allow_html=True,
     )
 with ctop3:
-    best_rul_text = bundle["rul"]["best_model"] if bundle.get("rul") else "Not Available"
     st.markdown(
         f"""
         <div class="card">
-            <div class="section-title">Best Tabular RUL Model</div>
-            <div class="small-note">{best_rul_text}</div>
+            <div class="section-title">Fault Horizon Classes</div>
+            <div class="small-note">Safe / Risk</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -674,22 +712,12 @@ if predict_btn:
                 else:
                     fault_type_pred = "N/A"
 
-        days_before_fault = None
-        days_model_name = "N/A"
+        horizon_pred = None
+        horizon_conf = None
+        horizon_model_name = "N/A"
 
-        if final_condition != "Fault" and machine in {"boiler", "pellet"}:
-            days_before_fault, days_model_name = predict_days_to_fault_lstm(machine, input_rows)
-
-        if final_condition != "Fault" and days_before_fault is None and cfg["rul_enabled"] and bundle.get("rul"):
-            try:
-                best_rul = bundle["rul"]["best_model"]
-                rul_pipe = bundle["rul"]["pipelines"][best_rul]
-                val_hours = float(rul_pipe.predict(X)[0])
-                if np.isfinite(val_hours) and val_hours >= 0:
-                    days_before_fault = val_hours / 24.0
-                    days_model_name = f"{best_rul} (RUL fallback)"
-            except Exception:
-                days_before_fault = None
+        if machine in {"boiler", "pellet"}:
+            horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
 
         fixes = suggest_fix(machine, fault_type_pred)
 
@@ -711,15 +739,15 @@ if predict_btn:
             )
 
         with k3:
-            if final_condition == "Fault":
+            if horizon_pred is None:
                 value_text = "N/A"
-                meta_text = "Machine already in Fault state"
+                meta_text = horizon_model_name
             else:
-                value_text = "N/A" if days_before_fault is None else f"{days_before_fault:,.2f} days"
-                meta_text = days_model_name
+                value_text = f'<span class="{horizon_badge_class(horizon_pred)}">{horizon_pred}</span>'
+                meta_text = horizon_model_name if horizon_conf is None else f"{horizon_model_name} | Confidence: {horizon_conf:.2%}"
 
             render_metric_card(
-                "Days Before Fault",
+                "Fault Horizon",
                 value_text,
                 meta_text,
             )
@@ -740,8 +768,8 @@ if predict_btn:
             st.write(f"**Machine:** {machine.upper()}")
             st.write(f"**Machine Condition:** {final_condition}")
             st.write(f"**Fault Type:** {fault_type_pred}")
-            st.write(f"**Days Before Fault:** {'N/A' if days_before_fault is None else f'{days_before_fault:,.2f} days'}")
-            st.write(f"**Days Model:** {days_model_name}")
+            st.write(f"**Fault Horizon:** {horizon_pred if horizon_pred is not None else 'N/A'}")
+            st.write(f"**Horizon Confidence:** {'N/A' if horizon_conf is None else f'{horizon_conf:.2%}'}")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
