@@ -9,5 +9,3 @@ gdown
 matplotlib
 xgboost
 lightgbm
-tensorflow==2.21.0
-h5py==3.14.0
