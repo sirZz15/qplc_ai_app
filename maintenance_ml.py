@@ -535,7 +535,7 @@ def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
             numeric_candidate_cols.append(c)
 
     if cfg["use_history"]:
-        df = add_history_features(df, numeric_candidate_cols, history_steps=history_steps)
+        df = add_history_features(df, numeric_candidate_cols, history_steps=3)
 
     return df
 

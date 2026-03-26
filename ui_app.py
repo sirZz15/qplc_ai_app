@@ -602,11 +602,11 @@ if not bundle:
     st.stop()
 
 cfg = MACHINES[machine]
-history_steps = 7 if machine in {"boiler", "pellet"} else 1
+history_steps = 3 if machine in {"boiler", "pellet"} else 1
 
 st.sidebar.markdown("---")
 if machine in {"boiler", "pellet"}:
-    st.sidebar.caption("Boiler and Pellet use 7 input sets: Day -6 to Current Day.")
+    st.sidebar.caption("Boiler and Pellet use 3 input sets: Day -2, Day -1, and Current Day.")
 else:
     st.sidebar.caption("Genset uses current values only.")
 
@@ -666,7 +666,7 @@ st.markdown('<div class="card">', unsafe_allow_html=True)
 st.subheader("🔎 Input Machine Features")
 
 if machine in ["boiler", "pellet"]:
-    st.caption("Enter exactly 7 sets of values in order: Day -6, Day -5, Day -4, Day -3, Day -2, Day -1, and Current Day.")
+    st.caption("Enter exactly 3 sets of values in order: Day -2, Day -1, and Current Day.")
 else:
     st.caption("Enter the current/latest values only.")
 
