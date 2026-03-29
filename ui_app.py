@@ -20,7 +20,7 @@ from maintenance_ml import (
 )
 
 st.set_page_config(
-    page_title="QPLC AI Predictive Maintenance Dashboard",
+    page_title="AI Predictive Maintenance Dashboard",
     page_icon="🛠️",
     layout="wide",
 )
