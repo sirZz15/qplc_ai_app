@@ -577,7 +577,7 @@ def predict_fault_horizon(machine: str, input_rows: List[Dict[str, Any]]) -> tup
 st.markdown(
     """
     <div class="hero">
-        <div class="big-title">🛠️ QPLC AI Predictive Maintenance Dashboard</div>
+        <div class="big-title">🛠️ AI Predictive Maintenance Dashboard</div>
         <div class="subtle">
             Predict machine condition, fault type, and fault horizon risk.
         </div>
