@@ -1045,7 +1045,7 @@ def train_machine(machine: str) -> Dict[str, Any]:
 
 def train_fault_horizon_classifier(
     machine: str,
-    seq_len: int = 7,
+    seq_len: int = 3,
 ) -> Optional[Dict[str, Any]]:
     if machine not in {"boiler", "pellet"}:
         return None
@@ -1099,8 +1099,8 @@ def train_fault_horizon_classifier(
         "machine": machine,
         "target": "fault_horizon_class",
         "horizon_definition": {
-            "Risk": "0-10 days",
-            "Safe": ">10 days",
+            "Risk": "0-10 days using 3 past daily inputs",
+            "Safe": ">10 days using 3 past daily inputs",
         },
         "seq_len": seq_len,
         "feature_columns": list(Xh.columns),
@@ -1151,7 +1151,7 @@ def main() -> None:
             try:
                 horizon_bundle = train_fault_horizon_classifier(
                     machine=m,
-                    seq_len=7,
+                    seq_len=3,
                 )
                 if horizon_bundle is not None:
                     save_horizon_results(horizon_bundle, m, results_dir)

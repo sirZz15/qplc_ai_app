@@ -16,6 +16,7 @@ from maintenance_ml import (
     build_history_input_frame,
     infer_boiler_fault_type_rules,
     infer_genset_fault_type_rules,
+    infer_pellet_fault_type_rules,
 )
 
 st.set_page_config(
@@ -606,7 +607,7 @@ history_steps = 3 if machine in {"boiler", "pellet"} else 1
 
 st.sidebar.markdown("---")
 if machine in {"boiler", "pellet"}:
-    st.sidebar.caption("Boiler and Pellet use 3 input sets: Day -2, Day -1, and Current Day.")
+    st.sidebar.caption("Boiler and Pellet use 3 input sets: Day -2, Day -1, and Current Day. Fault horizon also uses the same 3-day window.")
 else:
     st.sidebar.caption("Genset uses current values only.")
 
@@ -692,7 +693,7 @@ if predict_btn:
         final_condition = final_machine_condition(sev_pred, ff_pred)
 
         fault_type_pred = "N/A"
-        fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "N/A"
+        fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "ML / Rule Fallback"
 
         if final_condition != "Normal":
             if machine == "boiler":
@@ -704,13 +705,17 @@ if predict_btn:
                 fault_type_pred = ft if ft else "N/A"
 
             elif machine == "pellet":
+                rule_ft = infer_pellet_fault_type_rules(input_rows)
                 if bundle["fault_type"]["pipelines"] and bundle["fault_type"]["best_model"]:
                     best_ft = bundle["fault_type"]["best_model"]
                     ft_pipe = bundle["fault_type"]["pipelines"][best_ft]
-                    fault_type_model_name = best_ft
+                    fault_type_model_name = f"{best_ft} + rule fallback"
                     fault_type_pred = str(ft_pipe.predict(X)[0])
+                    if not fault_type_pred or fault_type_pred in {"Normal", "N/A"}:
+                        fault_type_pred = rule_ft if rule_ft else "N/A"
                 else:
-                    fault_type_pred = "N/A"
+                    fault_type_model_name = "Rule-based"
+                    fault_type_pred = rule_ft if rule_ft else "N/A"
 
         horizon_pred = None
         horizon_conf = None

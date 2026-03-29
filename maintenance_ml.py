@@ -338,6 +338,14 @@ FIX_LIBRARY = {
             "Inspect pellet mill load, die/roller condition, and feed rate.",
             "Check motor current against rated value and inspect bearings.",
         ],
+        "Die / Roller Friction": [
+            "Inspect die and roller surface for wear, friction, and poor lubrication.",
+            "Check alignment and clean any compacted material buildup.",
+        ],
+        "Feed Overload / Blockage": [
+            "Reduce feeder rate and inspect for choking or material blockage.",
+            "Check feeder consistency and clear compacted material in the pellet path.",
+        ],
     },
 }
 
@@ -708,8 +716,15 @@ def infer_genset_fault_type_rules(row_dict: Dict[str, Any]) -> str:
         return "Frequency Instability"
     if np.isfinite(v1) and v1 < 200:
         return "Voltage Drop"
-    if np.isfinite(c1) and c1 > 0 and c1 >= 1.20 * c1:
-        return "Current Unbalance"
+    current_cols = [c for c in row.index if "CURRENT" in normalize_col_name(c)]
+    current_vals = [pd.to_numeric(row[c], errors="coerce") for c in current_cols]
+    current_vals = [v for v in current_vals if np.isfinite(v)]
+    if len(current_vals) >= 2:
+        max_i = max(current_vals)
+        min_i = min(current_vals)
+        avg_i = np.mean(current_vals)
+        if avg_i > 0 and (max_i - min_i) / avg_i >= 0.20:
+            return "Current Unbalance"
 
     return "N/A"
 
@@ -726,13 +741,12 @@ def infer_boiler_fault_type_rules(history_rows: List[Dict[str, Any]]) -> str:
                 return c
         return None
 
-    steam_col = find_col("MAIN STREAM PRESSURE")
+    steam_col = find_col("MAIN STEAM PRESSURE") or find_col("MAIN STREAM PRESSURE")
     fuel_temp_col = find_col("FUEL GAS")
     fuel_press_col = find_col("FUEL PRESSURE")
 
-    water_cols = [c for c in df.columns if "WATER" in normalize_col_name(c)]
-    boiler_water_col = water_cols[0] if len(water_cols) >= 1 else None
-    fw_tank_col = water_cols[1] if len(water_cols) >= 2 else None
+    boiler_water_col = find_col("BOILER WATER")
+    fw_tank_col = find_col("FEED WATER TANK")
 
     def delta(col: Optional[str], tail_n: int = 4) -> float:
         if col is None or col not in df.columns:
@@ -792,5 +806,72 @@ def infer_boiler_fault_type_rules(history_rows: List[Dict[str, Any]]) -> str:
 
     if np.isfinite(steam_now) and steam_now <= 80:
         return "Main Steam Line Leak"
+
+    return "N/A"
+
+def infer_pellet_fault_type_rules(history_rows: List[Dict[str, Any]]) -> str:
+    if not history_rows:
+        return "N/A"
+
+    df = pd.DataFrame(history_rows).copy()
+
+    def find_col(pattern: str) -> Optional[str]:
+        for c in df.columns:
+            if pattern in normalize_col_name(c):
+                return c
+        return None
+
+    def delta(col: Optional[str], tail_n: int = 3) -> float:
+        if col is None or col not in df.columns:
+            return np.nan
+        s = clean_numeric_series(df[col]).dropna()
+        if len(s) < 2:
+            return np.nan
+        s = s.tail(tail_n)
+        return float(s.iloc[-1] - s.iloc[0])
+
+    amp1_col = find_col("AMP1")
+    amp2_col = find_col("AMP2")
+    us_col = find_col("US PRESS")
+    ds_col = find_col("DS PRESS")
+    feeder_col = find_col("FEEDER RATE")
+    temp_col = find_col("TEMPERATURE")
+
+    amp1_d = delta(amp1_col)
+    amp2_d = delta(amp2_col)
+    us_d = delta(us_col)
+    ds_d = delta(ds_col)
+    feeder_d = delta(feeder_col)
+    temp_d = delta(temp_col)
+
+    last = df.iloc[-1]
+    amp1_now = pd.to_numeric(last.get(amp1_col, np.nan), errors="coerce")
+    amp2_now = pd.to_numeric(last.get(amp2_col, np.nan), errors="coerce")
+    us_now = pd.to_numeric(last.get(us_col, np.nan), errors="coerce")
+    ds_now = pd.to_numeric(last.get(ds_col, np.nan), errors="coerce")
+    feeder_now = pd.to_numeric(last.get(feeder_col, np.nan), errors="coerce")
+    temp_now = pd.to_numeric(last.get(temp_col, np.nan), errors="coerce")
+
+    if np.isfinite(us_now) and np.isfinite(ds_now) and us_now > 0 and ds_now > 0:
+        if us_now < 4.5 or ds_now < 1.8:
+            return "PRV Malfunction"
+
+    if np.isfinite(us_d) and np.isfinite(ds_d) and (us_d < -0.5 or ds_d < -0.3):
+        return "PRV Malfunction"
+
+    amp_now = np.nanmax([amp1_now, amp2_now])
+    amp_d = np.nanmax([amp1_d, amp2_d])
+    if np.isfinite(amp_now) and amp_now >= 85:
+        return "Motor Overload"
+    if np.isfinite(amp_d) and amp_d >= 10 and np.isfinite(feeder_d) and feeder_d > 0:
+        return "Motor Overload"
+
+    if np.isfinite(temp_now) and temp_now >= 95:
+        return "Die / Roller Friction"
+    if np.isfinite(temp_d) and temp_d >= 10:
+        return "Die / Roller Friction"
+
+    if np.isfinite(feeder_now) and feeder_now >= 95 and np.isfinite(amp_now) and amp_now >= 75:
+        return "Feed Overload / Blockage"
 
     return "N/A"
