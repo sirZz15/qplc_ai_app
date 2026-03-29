@@ -505,7 +505,13 @@ def load_machine_df(machine: str) -> pd.DataFrame:
             continue
 
         if machine == "pellet" and normalize_col_name(c) == "FEED TYPE":
-            df[c] = df[c].astype(str).replace({"nan": np.nan}).str.strip()
+            df[c] = (
+                df[c]
+                .astype(str)
+                .replace({"nan": np.nan, "None": np.nan})
+                .str.strip()
+            )
+            df.loc[df[c] == "", c] = np.nan
             continue
 
         s_num = clean_numeric_series(df[c])
@@ -529,9 +535,6 @@ def build_modeling_frame(machine: str, history_steps: int = 3) -> pd.DataFrame:
 
     for c in df.columns:
         if c in reserved:
-            continue
-
-        if machine == "pellet" and normalize_col_name(c) == "FEED TYPE":
             continue
 
         if machine == "pellet" and normalize_col_name(c) == "OPERATING HOURS":

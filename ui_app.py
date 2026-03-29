@@ -621,7 +621,7 @@ base_fields = get_display_base_fields(feature_cols)
 if machine == "boiler":
     base_fields = [f for f in base_fields if normalize_col_name(f) != "OPERATING HOURS"]
 elif machine == "pellet":
-    base_fields = [f for f in base_fields if normalize_col_name(f) not in {"HOURS", "FEED TYPE", "OPERATING HOURS"}]
+    base_fields = [f for f in base_fields if normalize_col_name(f) not in {"HOURS", "OPERATING HOURS"}]
 
 # =========================================================
 # Top summary
