@@ -415,11 +415,13 @@ def get_best_pipe(bundle: Dict[str, Any], section: str):
         return None, None
     return best_name, bundle[section]["pipelines"][best_name]
 
+def final_machine_condition(ff_pred: str, horizon_pred: Optional[str]) -> str:
+    ff = str(ff_pred).strip().lower()
+    hz = str(horizon_pred).strip().lower() if horizon_pred is not None else ""
 
-def final_machine_condition(sev_pred: str, ff_pred: str) -> str:
-    if sev_pred == "Fault" or ff_pred == "Fault":
-        return "Fault"
-    if sev_pred == "Trend":
+    if ff == "fault":
+        return "Critical"
+    if hz == "risk":
         return "Trending to Fault"
     return "Normal"
 
@@ -684,13 +686,17 @@ if predict_btn:
     try:
         X = build_history_input_frame(machine, input_rows, bundle)
 
-        sev_name, sev_pipe = get_best_pipe(bundle, "severity")
         ff_name, ff_pipe = get_best_pipe(bundle, "fault_flag")
+        ff_pred = str(ff_pipe.predict(X)[0]).strip()
 
-        sev_pred = str(sev_pipe.predict(X)[0])
-        ff_pred = str(ff_pipe.predict(X)[0])
+        horizon_pred = None
+        horizon_conf = None
+        horizon_model_name = "N/A"
 
-        final_condition = final_machine_condition(sev_pred, ff_pred)
+        if machine in {"boiler", "pellet"}:
+            horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
+
+        final_condition = final_machine_condition(ff_pred, horizon_pred)
 
         fault_type_pred = "N/A"
         fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "ML / Rule Fallback"
@@ -717,13 +723,6 @@ if predict_btn:
                     fault_type_model_name = "Rule-based"
                     fault_type_pred = rule_ft if rule_ft else "N/A"
 
-        horizon_pred = None
-        horizon_conf = None
-        horizon_model_name = "N/A"
-
-        if machine in {"boiler", "pellet"}:
-            horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
-
         fixes = suggest_fix(machine, fault_type_pred)
 
         st.write("")
@@ -733,7 +732,7 @@ if predict_btn:
             render_metric_card(
                 "Machine Condition",
                 f'<span class="{badge_class(final_condition)}">{final_condition}</span>',
-                f"Severity model: {sev_name} | Fault flag model: {ff_name}",
+                f"Fault flag model: {ff_name} | Horizon model: {horizon_model_name if machine in {'boiler', 'pellet'} else 'N/A'}",
             )
 
         with k2:
@@ -744,7 +743,10 @@ if predict_btn:
             )
 
         with k3:
-            if horizon_pred is None:
+            if str(ff_pred).strip().lower() == "fault":
+                value_text = "Disregarded"
+                meta_text = "Fault detected by fault flag model; final condition automatically set to Critical"
+            elif horizon_pred is None:
                 value_text = "N/A"
                 meta_text = horizon_model_name
             else:
@@ -773,8 +775,13 @@ if predict_btn:
             st.write(f"**Machine:** {machine.upper()}")
             st.write(f"**Machine Condition:** {final_condition}")
             st.write(f"**Fault Type:** {fault_type_pred}")
-            st.write(f"**Fault Horizon:** {horizon_pred if horizon_pred is not None else 'N/A'}")
-            st.write(f"**Horizon Confidence:** {'N/A' if horizon_conf is None else f'{horizon_conf:.2%}'}")
+
+            if str(ff_pred).strip().lower() == "fault":
+                st.write("**Fault Horizon:** Disregarded")
+                st.write("**Horizon Confidence:** N/A")
+            else:
+                st.write(f"**Fault Horizon:** {horizon_pred if horizon_pred is not None else 'N/A'}")
+                st.write(f"**Horizon Confidence:** {'N/A' if horizon_conf is None else f'{horizon_conf:.2%}'}")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
