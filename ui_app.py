@@ -176,6 +176,8 @@ def badge_class(condition: str) -> str:
         return "badge badge-ok"
     if condition == "Trending to Fault":
         return "badge badge-mid"
+    if condition == "Risk":
+        return "badge badge-mid"
     return "badge badge-bad"
 
 
@@ -183,7 +185,7 @@ def horizon_badge_class(label: str) -> str:
     if label == "Safe":
         return "badge badge-ok"
     if label == "Risk":
-        return "badge badge-bad"
+        return "badge badge-mid"
     if label == "Critical":
         return "badge badge-bad"
     return "badge"
@@ -418,15 +420,17 @@ def get_best_pipe(bundle: Dict[str, Any], section: str):
     return best_name, bundle[section]["pipelines"][best_name]
 
 
-def final_machine_condition(ff_pred: str, horizon_pred: Optional[str]) -> str:
+def final_fault_horizon(ff_pred: str, horizon_pred: Optional[str]) -> str:
     ff = str(ff_pred).strip().lower()
     hz = str(horizon_pred).strip().lower() if horizon_pred is not None else ""
 
     if ff == "fault":
         return "Critical"
     if hz == "risk":
-        return "Trending to Fault"
-    return "Normal"
+        return "Risk"
+    if hz == "safe":
+        return "Safe"
+    return "N/A"
 
 
 def _safe_float(v: Any) -> float:
@@ -699,12 +703,13 @@ if predict_btn:
         if machine in {"boiler", "pellet"}:
             horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
 
-        final_condition = final_machine_condition(ff_pred, horizon_pred)
+        machine_condition = "Fault" if str(ff_pred).strip().lower() == "fault" else "Normal"
+        final_horizon = final_fault_horizon(ff_pred, horizon_pred)
 
         fault_type_pred = "N/A"
         fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "ML / Rule Fallback"
 
-        if final_condition != "Normal":
+        if machine_condition != "Normal":
             if machine == "boiler":
                 ft = infer_boiler_fault_type_rules(input_rows)
                 fault_type_pred = ft if ft else "N/A"
@@ -734,7 +739,7 @@ if predict_btn:
         with k1:
             render_metric_card(
                 "Machine Condition",
-                f'<span class="{badge_class(final_condition)}">{final_condition}</span>',
+                f'<span class="{badge_class(machine_condition)}">{machine_condition}</span>',
                 "",
             )
 
@@ -746,12 +751,10 @@ if predict_btn:
             )
 
         with k3:
-            if str(ff_pred).strip().lower() == "fault":
-                value_text = f'<span class="{horizon_badge_class("Critical")}">Critical</span>'
-            elif horizon_pred is None:
+            if final_horizon == "N/A":
                 value_text = "N/A"
             else:
-                value_text = f'<span class="{horizon_badge_class(horizon_pred)}">{horizon_pred}</span>'
+                value_text = f'<span class="{horizon_badge_class(final_horizon)}">{final_horizon}</span>'
 
             render_metric_card(
                 "Fault Horizon",
@@ -773,14 +776,9 @@ if predict_btn:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.subheader("📌 Prediction Summary")
             st.write(f"**Machine:** {machine.upper()}")
-            st.write(f"**Machine Condition:** {final_condition}")
+            st.write(f"**Machine Condition:** {machine_condition}")
             st.write(f"**Fault Type:** {fault_type_pred}")
-
-            if str(ff_pred).strip().lower() == "fault":
-                st.write("**Fault Horizon:** Critical")
-            else:
-                st.write(f"**Fault Horizon:** {horizon_pred if horizon_pred is not None else 'N/A'}")
-
+            st.write(f"**Fault Horizon:** {final_horizon}")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
