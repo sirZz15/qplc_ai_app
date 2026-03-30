@@ -184,6 +184,8 @@ def horizon_badge_class(label: str) -> str:
         return "badge badge-ok"
     if label == "Risk":
         return "badge badge-bad"
+    if label == "Critical":
+        return "badge badge-bad"
     return "badge"
 
 
@@ -414,6 +416,7 @@ def get_best_pipe(bundle: Dict[str, Any], section: str):
     if best_name is None:
         return None, None
     return best_name, bundle[section]["pipelines"][best_name]
+
 
 def final_machine_condition(ff_pred: str, horizon_pred: Optional[str]) -> str:
     ff = str(ff_pred).strip().lower()
@@ -732,31 +735,28 @@ if predict_btn:
             render_metric_card(
                 "Machine Condition",
                 f'<span class="{badge_class(final_condition)}">{final_condition}</span>',
-                f"Fault flag model: {ff_name} | Horizon model: {horizon_model_name if machine in {'boiler', 'pellet'} else 'N/A'}",
+                "",
             )
 
         with k2:
             render_metric_card(
                 "Fault Type",
                 fault_type_pred,
-                f"Method: {fault_type_model_name}",
+                "",
             )
 
         with k3:
             if str(ff_pred).strip().lower() == "fault":
-                value_text = "Disregarded"
-                meta_text = "Fault detected by fault flag model; final condition automatically set to Critical"
+                value_text = f'<span class="{horizon_badge_class("Critical")}">Critical</span>'
             elif horizon_pred is None:
                 value_text = "N/A"
-                meta_text = horizon_model_name
             else:
                 value_text = f'<span class="{horizon_badge_class(horizon_pred)}">{horizon_pred}</span>'
-                meta_text = horizon_model_name if horizon_conf is None else f"{horizon_model_name} | Confidence: {horizon_conf:.2%}"
 
             render_metric_card(
                 "Fault Horizon",
                 value_text,
-                meta_text,
+                "",
             )
 
         st.write("")
@@ -777,11 +777,10 @@ if predict_btn:
             st.write(f"**Fault Type:** {fault_type_pred}")
 
             if str(ff_pred).strip().lower() == "fault":
-                st.write("**Fault Horizon:** Disregarded")
-                st.write("**Horizon Confidence:** N/A")
+                st.write("**Fault Horizon:** Critical")
             else:
                 st.write(f"**Fault Horizon:** {horizon_pred if horizon_pred is not None else 'N/A'}")
-                st.write(f"**Horizon Confidence:** {'N/A' if horizon_conf is None else f'{horizon_conf:.2%}'}")
+
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
