@@ -174,9 +174,9 @@ def is_dropdown_column(machine: str, col_name: str) -> bool:
 def badge_class(condition: str) -> str:
     if condition == "Normal":
         return "badge badge-ok"
-    if condition == "Trending to Fault":
-        return "badge badge-mid"
     if condition == "Risk":
+        return "badge badge-mid"
+    if condition == "Trending to Fault":
         return "badge badge-mid"
     return "badge badge-bad"
 
@@ -339,6 +339,38 @@ def get_dropdown_options(df_ref: pd.DataFrame, field: str) -> List[str]:
     return vals
 
 
+def get_default_input_value(df_ref: pd.DataFrame, field: str, numeric: bool = False):
+    if field not in df_ref.columns:
+        return 0.0 if numeric else ""
+
+    series = df_ref[field].dropna()
+
+    if series.empty:
+        return 0.0 if numeric else ""
+
+    if numeric:
+        s = pd.to_numeric(series, errors="coerce").dropna()
+        if s.empty:
+            return 0.0
+
+        mode_vals = s.mode()
+        if not mode_vals.empty:
+            return float(mode_vals.iloc[0])
+
+        return float(s.median())
+
+    s = series.astype(str).str.strip()
+    s = s[s != ""]
+    if s.empty:
+        return ""
+
+    mode_vals = s.mode()
+    if not mode_vals.empty:
+        return str(mode_vals.iloc[0])
+
+    return str(s.iloc[0])
+
+
 def build_grouped_input_form(
     machine: str,
     base_fields: List[str],
@@ -381,18 +413,26 @@ def build_grouped_input_form(
                     with target_col:
                         if is_dropdown_column(machine, field):
                             options = get_dropdown_options(df_ref, field)
+                            default_val = get_default_input_value(df_ref, field, numeric=False)
+
+                            try:
+                                default_idx = options.index(default_val)
+                            except ValueError:
+                                default_idx = 0
+
                             val = st.selectbox(
                                 field,
                                 options=options,
-                                index=0,
+                                index=default_idx,
                                 key=f"{machine}_{row_idx}_{field}",
                             )
                             row_inputs[field] = val
 
                         elif is_numericish_column(field):
+                            default_val = get_default_input_value(df_ref, field, numeric=True)
                             val = st.number_input(
                                 label=field,
-                                value=0.0,
+                                value=float(default_val),
                                 step=0.01,
                                 format="%.4f",
                                 key=f"{machine}_{row_idx}_{field}",
@@ -400,9 +440,10 @@ def build_grouped_input_form(
                             row_inputs[field] = val
 
                         else:
+                            default_val = get_default_input_value(df_ref, field, numeric=False)
                             row_inputs[field] = st.text_input(
                                 field,
-                                value="",
+                                value=default_val,
                                 key=f"{machine}_{row_idx}_{field}",
                             )
 
