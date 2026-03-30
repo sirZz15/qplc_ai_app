@@ -474,6 +474,30 @@ def final_fault_horizon(ff_pred: str, horizon_pred: Optional[str]) -> str:
     return "N/A"
 
 
+def get_horizon_instruction(horizon_label: str) -> str:
+    label = str(horizon_label).strip().lower()
+
+    if label == "critical":
+        return (
+            "Stop operation if necessary and inspect the machine immediately. "
+            "A fault is already present. Perform corrective maintenance and verify system parameters before resuming operation."
+        )
+
+    if label == "risk":
+        return (
+            "A fault may occur within 1–10 days. Perform preventive inspection immediately, "
+            "closely monitor key parameters, and prepare maintenance actions to prevent failure."
+        )
+
+    if label == "safe":
+        return (
+            "No immediate fault expected. Possible fault may occur after 10 days. "
+            "Continue normal operation and follow scheduled preventive maintenance."
+        )
+
+    return "No instruction available."
+
+
 def _safe_float(v: Any) -> float:
     try:
         return float(v)
@@ -746,6 +770,7 @@ if predict_btn:
 
         machine_condition = "Fault" if str(ff_pred).strip().lower() == "fault" else "Normal"
         final_horizon = final_fault_horizon(ff_pred, horizon_pred)
+        horizon_instruction = get_horizon_instruction(final_horizon)
 
         fault_type_pred = "N/A"
         fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "ML / Rule Fallback"
@@ -809,6 +834,8 @@ if predict_btn:
         with lower1:
             st.markdown('<div class="card">', unsafe_allow_html=True)
             st.subheader("🧰 Suggested Fix / Recommended Actions")
+            st.write(f"**Recommended Action (Based on Condition):** {horizon_instruction}")
+            st.write("")
             for i, line in enumerate(fixes, 1):
                 st.write(f"{i}. {line}")
             st.markdown("</div>", unsafe_allow_html=True)
