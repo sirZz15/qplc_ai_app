@@ -4,7 +4,7 @@ import os
 import re
 import warnings
 from pathlib import Path
-from typing import Dict, Any, Optional, Tuple
+from typing import Dict, Any, Optional, Tuple, List
 
 import numpy as np
 import pandas as pd
@@ -538,6 +538,111 @@ def plot_feature_importance(
     plt.close()
 
 
+def plot_overall_accuracy_comparison(
+    df: pd.DataFrame,
+    save_path: str,
+    title: str = "Overall Accuracy Comparison of All Trained Classification Models",
+) -> None:
+    if df.empty:
+        return
+
+    dff = df.sort_values(["accuracy", "f1_macro"], ascending=[False, False]).copy()
+    labels = dff["machine"] + " | " + dff["target"] + " | " + dff["model"]
+
+    plt.figure(figsize=(14, max(7, len(dff) * 0.35)))
+    bars = plt.barh(labels[::-1], dff["accuracy"].values[::-1])
+    plt.title(title, fontweight="bold")
+    plt.xlabel("Accuracy")
+    plt.ylabel("Machine | Target | Algorithm")
+    plt.grid(axis="x", linestyle="--", alpha=0.4)
+
+    for bar in bars:
+        width = bar.get_width()
+        plt.text(
+            width + 0.002,
+            bar.get_y() + bar.get_height() / 2,
+            f"{width:.3f}",
+            va="center",
+            fontsize=9,
+        )
+
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight", dpi=300)
+    plt.close()
+
+
+def plot_algorithm_accuracy_summary(
+    df: pd.DataFrame,
+    save_path: str,
+    title: str = "Average Accuracy per Algorithm Across All Trained Classification Models",
+) -> None:
+    if df.empty:
+        return
+
+    agg = (
+        df.groupby("model", as_index=False)
+        .agg(
+            mean_accuracy=("accuracy", "mean"),
+            mean_f1_macro=("f1_macro", "mean"),
+            runs=("accuracy", "count"),
+        )
+        .sort_values("mean_accuracy", ascending=False)
+        .reset_index(drop=True)
+    )
+
+    plt.figure(figsize=(12, 6))
+    bars = plt.bar(agg["model"], agg["mean_accuracy"])
+    plt.title(title, fontweight="bold")
+    plt.xlabel("Algorithm")
+    plt.ylabel("Mean Accuracy")
+    plt.xticks(rotation=40, ha="right")
+    plt.grid(axis="y", linestyle="--", alpha=0.4)
+
+    for i, bar in enumerate(bars):
+        height = bar.get_height()
+        plt.text(
+            bar.get_x() + bar.get_width() / 2,
+            height,
+            f"{height:.3f}\n(n={int(agg.loc[i, 'runs'])})",
+            ha="center",
+            va="bottom",
+            fontsize=9,
+        )
+
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight", dpi=300)
+    plt.close()
+
+
+def plot_accuracy_by_target(
+    df: pd.DataFrame,
+    save_path: str,
+    title: str = "Accuracy Comparison by Target",
+) -> None:
+    if df.empty:
+        return
+
+    pivot = (
+        df.groupby(["model", "target"], as_index=False)["accuracy"]
+        .mean()
+        .pivot(index="model", columns="target", values="accuracy")
+        .fillna(np.nan)
+    )
+
+    if pivot.empty:
+        return
+
+    ax = pivot.plot(kind="bar", figsize=(13, 7))
+    ax.set_title(title, fontweight="bold")
+    ax.set_xlabel("Algorithm")
+    ax.set_ylabel("Mean Accuracy")
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    plt.xticks(rotation=40, ha="right")
+    plt.tight_layout()
+    plt.savefig(save_path, bbox_inches="tight", dpi=300)
+    plt.close()
+
+
 def get_excel_source_path() -> str:
     env_path = os.environ.get("QPLC_XLSX_PATH")
     if env_path and os.path.exists(env_path):
@@ -789,6 +894,16 @@ def save_results(bundle: Dict[str, Any], machine: str, results_dir: str) -> None
             ascending=False,
         )
 
+        plot_bar_ranking(
+            df,
+            x_col="model",
+            y_col="accuracy",
+            title=f"{machine.upper()} - {sec.replace('_', ' ').title()} Accuracy Comparison",
+            ylabel="Accuracy",
+            save_path=os.path.join(machine_dir, f"{machine}_{sec}_accuracy_ranking.png"),
+            ascending=False,
+        )
+
         best_model_name = bundle[sec]["best_model"]
         best_item = next((x for x in leader if x["model"] == best_model_name), None)
 
@@ -875,6 +990,16 @@ def save_horizon_results(bundle: Dict[str, Any], machine: str, results_dir: str)
         ascending=False,
     )
 
+    plot_bar_ranking(
+        df,
+        x_col="model",
+        y_col="accuracy",
+        title=f"{machine.upper()} - Fault Horizon Accuracy Comparison",
+        ylabel="Accuracy",
+        save_path=os.path.join(machine_dir, f"{machine}_fault_horizon_accuracy_ranking.png"),
+        ascending=False,
+    )
+
     best_name = bundle["best_model"]
     best_item = next((x for x in bundle["leaderboard"] if x["model"] == best_name), None)
     if best_item is not None:
@@ -892,6 +1017,23 @@ def save_horizon_results(bundle: Dict[str, Any], machine: str, results_dir: str)
             best_item["classification_report"],
             os.path.join(machine_dir, f"{machine}_fault_horizon_classification_report.csv"),
         )
+
+
+def collect_classification_summary_rows(
+    machine: str,
+    section: str,
+    leaderboard: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    rows = []
+    for item in leaderboard:
+        rows.append({
+            "machine": machine,
+            "target": section,
+            "model": item["model"],
+            "accuracy": item["accuracy"],
+            "f1_macro": item["f1_macro"],
+        })
+    return rows
 
 
 def train_machine(machine: str) -> Dict[str, Any]:
@@ -1115,10 +1257,11 @@ def train_fault_horizon_classifier(
 
 
 def main() -> None:
-    results_dir = "results"
+    results_dir = "test_results"
     ensure_dir(results_dir)
 
     summary_rows = []
+    all_classification_rows = []
 
     for m in MACHINES.keys():
         print(f"Training: {m}")
@@ -1138,6 +1281,17 @@ def main() -> None:
         print("-" * 50)
 
         save_results(bundle, m, results_dir)
+
+        all_classification_rows.extend(
+            collect_classification_summary_rows(m, "severity", bundle["severity"]["leaderboard"])
+        )
+        all_classification_rows.extend(
+            collect_classification_summary_rows(m, "fault_flag", bundle["fault_flag"]["leaderboard"])
+        )
+        if bundle["fault_type"]["leaderboard"]:
+            all_classification_rows.extend(
+                collect_classification_summary_rows(m, "fault_type", bundle["fault_type"]["leaderboard"])
+            )
 
         summary_rows.append({
             "machine": m,
@@ -1159,6 +1313,14 @@ def main() -> None:
                     print(f"[HORIZON CLASSES] {m}: {horizon_bundle['class_labels']}")
                     print(f"[HORIZON DEFINITION] {m}: {horizon_bundle['horizon_definition']}")
                     print("-" * 50)
+
+                    all_classification_rows.extend(
+                        collect_classification_summary_rows(
+                            m,
+                            "fault_horizon",
+                            horizon_bundle["leaderboard"]
+                        )
+                    )
             except Exception as e:
                 print(f"[WARNING] Horizon classifier training failed for {m}: {e}")
 
@@ -1166,6 +1328,46 @@ def main() -> None:
         os.path.join(results_dir, "overall_best_models_summary.csv"),
         index=False
     )
+
+    all_cls_df = pd.DataFrame(all_classification_rows)
+    if not all_cls_df.empty:
+        all_cls_df = all_cls_df.sort_values(
+            ["accuracy", "f1_macro"],
+            ascending=[False, False]
+        ).reset_index(drop=True)
+
+        all_cls_df.to_csv(
+            os.path.join(results_dir, "overall_classification_accuracy_summary.csv"),
+            index=False
+        )
+
+        plot_overall_accuracy_comparison(
+            all_cls_df,
+            save_path=os.path.join(results_dir, "overall_accuracy_comparison_all_models.png"),
+            title="Overall Accuracy Comparison of Each Algorithm for All Trained Classification Models",
+        )
+
+        plot_algorithm_accuracy_summary(
+            all_cls_df,
+            save_path=os.path.join(results_dir, "average_accuracy_per_algorithm.png"),
+            title="Average Accuracy of Each Algorithm Across All Trained Classification Models",
+        )
+
+        plot_accuracy_by_target(
+            all_cls_df,
+            save_path=os.path.join(results_dir, "accuracy_comparison_by_target.png"),
+            title="Accuracy Comparison by Prediction Target",
+        )
+
+        best_per_target = (
+            all_cls_df.sort_values(["target", "accuracy", "f1_macro"], ascending=[True, False, False])
+            .groupby(["machine", "target"], as_index=False)
+            .first()
+        )
+        best_per_target.to_csv(
+            os.path.join(results_dir, "best_accuracy_per_machine_target.csv"),
+            index=False
+        )
 
 
 if __name__ == "__main__":

@@ -1,0 +1,4 @@
+machine,best_severity_model,best_fault_flag_model,best_fault_type_model,best_rul_model
+boiler,GradBoost,GradBoost,rule_based,ExtraTrees_Reg
+genset,SVM_RBF,SVM_RBF,rule_based,
+pellet,GradBoost,GradBoost,ExtraTrees,HistGB_Reg

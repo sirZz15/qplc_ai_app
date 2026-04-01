@@ -138,6 +138,12 @@ def normalize_col_name(col_name: str) -> str:
     return name
 
 
+def clean_display_label(label: str) -> str:
+    cleaned = re.sub(r"\s*\(.*?\)", "", str(label))
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
 def is_time_like_column(col_name: str) -> bool:
     name = normalize_col_name(col_name)
     if name in {"DAY", "WEEK", "DATE", "TIME", "TIMESTAMP", "DATETIME", "DAILY CONDITION", "WEEKLY CONDITION"}:
@@ -411,6 +417,8 @@ def build_grouped_input_form(
                 for i, field in enumerate(group_fields):
                     target_col = c1 if i % 2 == 0 else c2
                     with target_col:
+                        display_label = clean_display_label(field)
+
                         if is_dropdown_column(machine, field):
                             options = get_dropdown_options(df_ref, field)
                             default_val = get_default_input_value(df_ref, field, numeric=False)
@@ -421,7 +429,7 @@ def build_grouped_input_form(
                                 default_idx = 0
 
                             val = st.selectbox(
-                                field,
+                                display_label,
                                 options=options,
                                 index=default_idx,
                                 key=f"{machine}_{row_idx}_{field}",
@@ -431,7 +439,7 @@ def build_grouped_input_form(
                         elif is_numericish_column(field):
                             default_val = get_default_input_value(df_ref, field, numeric=True)
                             val = st.number_input(
-                                label=field,
+                                label=display_label,
                                 value=float(default_val),
                                 step=0.01,
                                 format="%.4f",
@@ -442,7 +450,7 @@ def build_grouped_input_form(
                         else:
                             default_val = get_default_input_value(df_ref, field, numeric=False)
                             row_inputs[field] = st.text_input(
-                                field,
+                                display_label,
                                 value=default_val,
                                 key=f"{machine}_{row_idx}_{field}",
                             )

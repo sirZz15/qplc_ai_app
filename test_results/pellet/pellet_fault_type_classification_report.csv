@@ -1,0 +1,11 @@
+,precision,recall,f1-score,support
+Excessive Conditioning,1.0,1.0,1.0,6.0
+High Die Temp,1.0,0.8888888888888888,0.9411764705882353,9.0
+Low Steam Supply,1.0,1.0,1.0,8.0
+Motor Overload,1.0,1.0,1.0,10.0
+Overload & Overheat,0.8888888888888888,1.0,0.9411764705882353,8.0
+PRV Malfunction,1.0,1.0,1.0,14.0
+Total Steam Failure,1.0,1.0,1.0,9.0
+accuracy,0.984375,0.984375,0.984375,0.984375
+macro avg,0.9841269841269842,0.9841269841269842,0.9831932773109244,64.0
+weighted avg,0.9861111111111112,0.984375,0.984375,64.0
