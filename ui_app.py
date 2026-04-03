@@ -884,16 +884,13 @@ if predict_btn:
         # Final machine condition logic
         # =========================================================
         final_fault_flag = ff_pred_ml
-        prediction_logic_note = ""
 
         if machine == "genset":
             if str(ff_pred_ml).strip().lower() == "fault":
                 final_fault_flag = "Fault"
-                prediction_logic_note = "Final result taken from ML fault flag model."
             else:
                 second_layer_flag = infer_genset_fault_flag_rules_ui(input_rows[-1])
                 final_fault_flag = second_layer_flag
-                prediction_logic_note = "ML predicted Normal, so second-layer rule-based fault check was applied."
 
         machine_condition = "Fault" if str(final_fault_flag).strip().lower() == "fault" else "Normal"
         final_horizon = final_fault_horizon(final_fault_flag, horizon_pred)
@@ -974,11 +971,6 @@ if predict_btn:
             st.write(f"**Machine Condition:** {machine_condition}")
             st.write(f"**Fault Type:** {fault_type_pred}")
             st.write(f"**Fault Horizon:** {final_horizon}")
-            if machine == "genset":
-                st.write(f"**ML Fault Flag Prediction:** {ff_pred_ml}")
-                st.write(f"**Final Fault Flag Used:** {final_fault_flag}")
-                if prediction_logic_note:
-                    st.write(f"**Prediction Logic:** {prediction_logic_note}")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
