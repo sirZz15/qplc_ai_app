@@ -235,6 +235,8 @@ def infer_machine_group(machine: str, col_name: str) -> str:
 
         if "MAIN STREAM PRESSURE" in c:
             return "Boiler Unit"
+        if "MAIN STEAM PRESSURE" in c:
+            return "Boiler Unit"
         if "FUEL GAS" in c:
             return "Boiler Unit"
         if "BOILER UNIT" in c:
@@ -275,7 +277,7 @@ def infer_machine_group(machine: str, col_name: str) -> str:
 
 def sort_group_fields(machine: str, group: str, fields: List[str]) -> List[str]:
     if machine == "boiler" and group == "Boiler Unit":
-        preferred = ["WATER", "MAIN STREAM PRESSURE", "FUEL GAS"]
+        preferred = ["WATER", "MAIN STEAM PRESSURE", "MAIN STREAM PRESSURE", "FUEL GAS"]
         return sorted(
             fields,
             key=lambda x: next((i for i, p in enumerate(preferred) if p in x.upper()), len(preferred))
@@ -514,15 +516,14 @@ def _safe_float(v: Any) -> float:
 
 
 # =========================================================
-# Genset second-layer rule-based fault flag
+# Genset second-layer rule-based machine condition
 # =========================================================
 def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
     """
     Second-layer genset fault/normal rule.
-    This is only used when the ML model predicts NORMAL for genset.
+    Only used when ML predicts NORMAL for genset.
     REMARKS is intentionally not used.
     """
-
     if row_dict is None:
         return "Normal"
 
@@ -568,50 +569,165 @@ def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
     freq = freq_vals[0] if freq_vals else np.nan
     temp = temp_vals[0] if temp_vals else np.nan
 
-    v_min = min_or_nan(voltage_vals)
-    v_max = max_or_nan(voltage_vals)
     i_min = min_or_nan(current_vals)
     i_max = max_or_nan(current_vals)
 
-    # 1. Critical Overheat
     if np.isfinite(temp) and temp >= 108:
         return "Fault"
 
-    # 2. Overheating
     if np.isfinite(temp) and temp >= 100:
         return "Fault"
 
-    # 3. Frequency Instability
     if np.isfinite(freq) and (freq < 59.0 or freq > 61.0):
         return "Fault"
 
-    # 4. High Oil Pressure
     if np.isfinite(oil) and oil >= 70:
         return "Fault"
 
-    # 5. Voltage Drop
     if np.isfinite(v_mean) and v_mean <= 430:
         return "Fault"
 
-    # 6. Current Unbalance
     if len(current_vals) >= 2 and np.isfinite(i_mean) and i_mean > 0:
         imbalance_ratio = (i_max - i_min) / i_mean
         if imbalance_ratio >= 1.0 and i_max >= 300:
             return "Fault"
 
-    # 7. Sensor Drift
     if np.isfinite(oil) and np.isfinite(i_mean) and np.isfinite(l_mean) and np.isfinite(temp):
         if oil <= 8 and i_mean == 0 and l_mean == 0 and temp < 90:
             return "Fault"
 
-    # 8. Combined Failure
     if np.isfinite(i_mean) and np.isfinite(l_mean) and np.isfinite(pf_mean) and np.isfinite(temp):
         if i_mean == 0 and l_mean == 0 and pf_mean == 0 and temp >= 95:
             return "Fault"
 
-    # 9. Low Oil Pressure
     if np.isfinite(oil) and np.isfinite(i_mean) and np.isfinite(l_mean):
         if 25 <= oil <= 35 and i_mean >= 240 and l_mean >= 160:
+            return "Fault"
+
+    return "Normal"
+
+
+# =========================================================
+# Boiler second-layer rule-based machine condition
+# =========================================================
+def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
+    """
+    Second-layer boiler fault/normal rule.
+    Uses the 3 input rows.
+    Only used when ML predicts NORMAL for boiler.
+    """
+    if not history_rows:
+        return "Normal"
+
+    df = pd.DataFrame(history_rows).copy()
+
+    def find_col(pattern: str) -> Optional[str]:
+        for c in df.columns:
+            if pattern in normalize_col_name(c):
+                return c
+        return None
+
+    def to_num_series(col: Optional[str]) -> pd.Series:
+        if col is None or col not in df.columns:
+            return pd.Series(dtype=float)
+        return pd.to_numeric(df[col], errors="coerce")
+
+    def normalize_boiler_water(s: pd.Series) -> pd.Series:
+        if s.empty:
+            return s
+        s = s.copy()
+        mask = s > 5
+        s.loc[mask] = s.loc[mask] / 100.0
+        return s
+
+    def delta(s: pd.Series) -> float:
+        s = s.dropna()
+        if len(s) < 2:
+            return np.nan
+        return float(s.iloc[-1] - s.iloc[0])
+
+    steam_col = find_col("MAIN STEAM PRESSURE") or find_col("MAIN STREAM PRESSURE")
+    fuel_gas_col = find_col("FUEL GAS")
+    fuel_press_col = find_col("FUEL PRESSURE")
+    boiler_water_col = find_col("BOILER WATER")
+    fw_tank_col = find_col("FEED WATER TANK")
+    oph_col = find_col("OPERATING HOURS")
+
+    steam_s = to_num_series(steam_col)
+    fuel_gas_s = to_num_series(fuel_gas_col)
+    fuel_press_s = to_num_series(fuel_press_col)
+    boiler_water_s = normalize_boiler_water(to_num_series(boiler_water_col))
+    fw_tank_s = to_num_series(fw_tank_col)
+    oph_s = to_num_series(oph_col)
+
+    steam_now = steam_s.iloc[-1] if len(steam_s) else np.nan
+    fuel_gas_now = fuel_gas_s.iloc[-1] if len(fuel_gas_s) else np.nan
+    fuel_press_now = fuel_press_s.iloc[-1] if len(fuel_press_s) else np.nan
+    boiler_water_now = boiler_water_s.iloc[-1] if len(boiler_water_s) else np.nan
+    fw_tank_now = fw_tank_s.iloc[-1] if len(fw_tank_s) else np.nan
+    oph_now = oph_s.iloc[-1] if len(oph_s) else np.nan
+
+    steam_d = delta(steam_s)
+    fuel_gas_d = delta(fuel_gas_s)
+    fuel_press_d = delta(fuel_press_s)
+    boiler_water_d = delta(boiler_water_s)
+    fw_tank_d = delta(fw_tank_s)
+
+    # Sudden E-Stop
+    if np.isfinite(oph_now) and oph_now <= 0.5:
+        return "Fault"
+
+    # Main Steam Line Leak
+    if np.isfinite(steam_now) and steam_now <= 80:
+        return "Fault"
+    if np.isfinite(steam_d) and steam_d <= -12:
+        return "Fault"
+
+    # Burner Trip / Fuel Pump Fail
+    if np.isfinite(fuel_press_now) and fuel_press_now <= 0.65:
+        return "Fault"
+    if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
+        if fuel_press_now <= 0.45 and fuel_gas_now <= 170 and steam_now <= 86:
+            return "Fault"
+    if np.isfinite(fuel_press_d) and np.isfinite(steam_d):
+        if fuel_press_d <= -0.25 and steam_d <= -8:
+            return "Fault"
+
+    # Burner Nozzle Fault
+    if np.isfinite(fuel_press_now) and fuel_press_now >= 1.50:
+        return "Fault"
+    if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now):
+        if fuel_press_now >= 1.30 and fuel_gas_now >= 220:
+            return "Fault"
+
+    # High Flue Gas Temp / Tube Scaling
+    if np.isfinite(fuel_gas_now) and fuel_gas_now >= 235:
+        return "Fault"
+    if np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
+        if fuel_gas_now >= 210 and steam_now <= 92:
+            return "Fault"
+    if np.isfinite(fuel_gas_d) and np.isfinite(steam_d):
+        if fuel_gas_d >= 20 and steam_d <= -3:
+            return "Fault"
+
+    # Low Water / Makeup Valve Stuck
+    if np.isfinite(fw_tank_now) and fw_tank_now <= 0.35:
+        return "Fault"
+    if np.isfinite(boiler_water_now) and boiler_water_now <= 0.35:
+        return "Fault"
+    if np.isfinite(fw_tank_now) and np.isfinite(boiler_water_now):
+        if fw_tank_now <= 0.60 and boiler_water_now <= 0.45:
+            return "Fault"
+    if np.isfinite(fw_tank_d) and np.isfinite(boiler_water_d):
+        if fw_tank_d <= -0.20 and boiler_water_d <= -0.08:
+            return "Fault"
+
+    # Level Controller Malfunction
+    if np.isfinite(boiler_water_now) and np.isfinite(steam_now):
+        if boiler_water_now >= 0.80 and steam_now <= 85:
+            return "Fault"
+    if np.isfinite(boiler_water_d) and np.isfinite(steam_d):
+        if boiler_water_d >= 0.15 and steam_d <= -8:
             return "Fault"
 
     return "Normal"
@@ -889,8 +1005,13 @@ if predict_btn:
             if str(ff_pred_ml).strip().lower() == "fault":
                 final_fault_flag = "Fault"
             else:
-                second_layer_flag = infer_genset_fault_flag_rules_ui(input_rows[-1])
-                final_fault_flag = second_layer_flag
+                final_fault_flag = infer_genset_fault_flag_rules_ui(input_rows[-1])
+
+        elif machine == "boiler":
+            if str(ff_pred_ml).strip().lower() == "fault":
+                final_fault_flag = "Fault"
+            else:
+                final_fault_flag = infer_boiler_fault_flag_rules_ui(input_rows)
 
         machine_condition = "Fault" if str(final_fault_flag).strip().lower() == "fault" else "Normal"
         final_horizon = final_fault_horizon(final_fault_flag, horizon_pred)
