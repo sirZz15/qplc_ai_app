@@ -91,8 +91,18 @@ def should_exclude_feature(machine: str, col_name: str) -> bool:
     if "CONDITION" in name:
         return True
 
-    if machine == "genset" and name == "REMARKS":
-        return True
+    if machine == "genset":
+        # existing exclusion
+        if name == "REMARKS":
+            return True
+
+        # new exclusions for genset
+        if "OPERATING HOURS" in name:
+            return True
+        if "FREQUENCY" in name:
+            return True
+        if "SPEED" in name:
+            return True
 
     if machine == "pellet" and name in {"OPERATING HOURS", "HOURS"}:
         return True

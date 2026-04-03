@@ -513,6 +513,110 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
+# =========================================================
+# Genset second-layer rule-based fault flag
+# =========================================================
+def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
+    """
+    Second-layer genset fault/normal rule.
+    This is only used when the ML model predicts NORMAL for genset.
+    REMARKS is intentionally not used.
+    """
+
+    if row_dict is None:
+        return "Normal"
+
+    row = pd.Series(row_dict)
+
+    def get_values(pattern: str) -> List[float]:
+        vals = []
+        for c in row.index:
+            if pattern in normalize_col_name(c):
+                v = pd.to_numeric(row[c], errors="coerce")
+                if np.isfinite(v):
+                    vals.append(float(v))
+        return vals
+
+    def mean_or_nan(vals: List[float]) -> float:
+        if not vals:
+            return np.nan
+        return float(np.mean(vals))
+
+    def max_or_nan(vals: List[float]) -> float:
+        if not vals:
+            return np.nan
+        return float(np.max(vals))
+
+    def min_or_nan(vals: List[float]) -> float:
+        if not vals:
+            return np.nan
+        return float(np.min(vals))
+
+    voltage_vals = get_values("VOLTAGE")
+    current_vals = get_values("CURRENT")
+    load_vals = get_values("LOAD")
+    pf_vals = get_values("POWER FACTOR")
+    oil_vals = get_values("OIL PRESSURE")
+    freq_vals = get_values("FREQUENCY")
+    temp_vals = get_values("COOLANT TEMPERATURE")
+
+    v_mean = mean_or_nan(voltage_vals)
+    i_mean = mean_or_nan(current_vals)
+    l_mean = mean_or_nan(load_vals)
+    pf_mean = mean_or_nan(pf_vals)
+    oil = oil_vals[0] if oil_vals else np.nan
+    freq = freq_vals[0] if freq_vals else np.nan
+    temp = temp_vals[0] if temp_vals else np.nan
+
+    v_min = min_or_nan(voltage_vals)
+    v_max = max_or_nan(voltage_vals)
+    i_min = min_or_nan(current_vals)
+    i_max = max_or_nan(current_vals)
+
+    # 1. Critical Overheat
+    if np.isfinite(temp) and temp >= 108:
+        return "Fault"
+
+    # 2. Overheating
+    if np.isfinite(temp) and temp >= 100:
+        return "Fault"
+
+    # 3. Frequency Instability
+    if np.isfinite(freq) and (freq < 59.0 or freq > 61.0):
+        return "Fault"
+
+    # 4. High Oil Pressure
+    if np.isfinite(oil) and oil >= 70:
+        return "Fault"
+
+    # 5. Voltage Drop
+    if np.isfinite(v_mean) and v_mean <= 430:
+        return "Fault"
+
+    # 6. Current Unbalance
+    if len(current_vals) >= 2 and np.isfinite(i_mean) and i_mean > 0:
+        imbalance_ratio = (i_max - i_min) / i_mean
+        if imbalance_ratio >= 1.0 and i_max >= 300:
+            return "Fault"
+
+    # 7. Sensor Drift
+    if np.isfinite(oil) and np.isfinite(i_mean) and np.isfinite(l_mean) and np.isfinite(temp):
+        if oil <= 8 and i_mean == 0 and l_mean == 0 and temp < 90:
+            return "Fault"
+
+    # 8. Combined Failure
+    if np.isfinite(i_mean) and np.isfinite(l_mean) and np.isfinite(pf_mean) and np.isfinite(temp):
+        if i_mean == 0 and l_mean == 0 and pf_mean == 0 and temp >= 95:
+            return "Fault"
+
+    # 9. Low Oil Pressure
+    if np.isfinite(oil) and np.isfinite(i_mean) and np.isfinite(l_mean):
+        if 25 <= oil <= 35 and i_mean >= 240 and l_mean >= 160:
+            return "Fault"
+
+    return "Normal"
+
+
 def build_horizon_input_frame(machine: str, input_rows: List[Dict[str, Any]], horizon_bundle: Dict[str, Any]) -> pd.DataFrame:
     seq_len = int(horizon_bundle.get("seq_len", 7))
     trained_cols = horizon_bundle["feature_columns"]
@@ -767,7 +871,7 @@ if predict_btn:
         X = build_history_input_frame(machine, input_rows, bundle)
 
         ff_name, ff_pipe = get_best_pipe(bundle, "fault_flag")
-        ff_pred = str(ff_pipe.predict(X)[0]).strip()
+        ff_pred_ml = str(ff_pipe.predict(X)[0]).strip()
 
         horizon_pred = None
         horizon_conf = None
@@ -776,8 +880,23 @@ if predict_btn:
         if machine in {"boiler", "pellet"}:
             horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
 
-        machine_condition = "Fault" if str(ff_pred).strip().lower() == "fault" else "Normal"
-        final_horizon = final_fault_horizon(ff_pred, horizon_pred)
+        # =========================================================
+        # Final machine condition logic
+        # =========================================================
+        final_fault_flag = ff_pred_ml
+        prediction_logic_note = ""
+
+        if machine == "genset":
+            if str(ff_pred_ml).strip().lower() == "fault":
+                final_fault_flag = "Fault"
+                prediction_logic_note = "Final result taken from ML fault flag model."
+            else:
+                second_layer_flag = infer_genset_fault_flag_rules_ui(input_rows[-1])
+                final_fault_flag = second_layer_flag
+                prediction_logic_note = "ML predicted Normal, so second-layer rule-based fault check was applied."
+
+        machine_condition = "Fault" if str(final_fault_flag).strip().lower() == "fault" else "Normal"
+        final_horizon = final_fault_horizon(final_fault_flag, horizon_pred)
         horizon_instruction = get_horizon_instruction(final_horizon)
 
         fault_type_pred = "N/A"
@@ -855,6 +974,11 @@ if predict_btn:
             st.write(f"**Machine Condition:** {machine_condition}")
             st.write(f"**Fault Type:** {fault_type_pred}")
             st.write(f"**Fault Horizon:** {final_horizon}")
+            if machine == "genset":
+                st.write(f"**ML Fault Flag Prediction:** {ff_pred_ml}")
+                st.write(f"**Final Fault Flag Used:** {final_fault_flag}")
+                if prediction_logic_note:
+                    st.write(f"**Prediction Logic:** {prediction_logic_note}")
             st.markdown("</div>", unsafe_allow_html=True)
 
         st.write("")
