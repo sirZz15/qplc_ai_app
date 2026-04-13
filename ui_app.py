@@ -6,6 +6,7 @@ from typing import Dict, Any, List, Optional
 import numpy as np
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
 
 from maintenance_ml import (
     MACHINES,
@@ -594,6 +595,9 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
+# =========================================================
+# Genset second-layer rule-based machine condition
+# =========================================================
 def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
     if row_dict is None:
         return "Normal"
@@ -678,6 +682,9 @@ def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
     return "Normal"
 
 
+# =========================================================
+# Boiler second-layer rule-based machine condition
+# =========================================================
 def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if not history_rows:
         return "Normal"
@@ -738,10 +745,12 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
 
     if np.isfinite(oph_now) and oph_now <= 0.5:
         return "Fault"
+
     if np.isfinite(steam_now) and steam_now <= 80:
         return "Fault"
     if np.isfinite(steam_d) and steam_d <= -12:
         return "Fault"
+
     if np.isfinite(fuel_press_now) and fuel_press_now <= 0.65:
         return "Fault"
     if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
@@ -750,11 +759,13 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if np.isfinite(fuel_press_d) and np.isfinite(steam_d):
         if fuel_press_d <= -0.25 and steam_d <= -8:
             return "Fault"
+
     if np.isfinite(fuel_press_now) and fuel_press_now >= 1.50:
         return "Fault"
     if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now):
         if fuel_press_now >= 1.30 and fuel_gas_now >= 220:
             return "Fault"
+
     if np.isfinite(fuel_gas_now) and fuel_gas_now >= 235:
         return "Fault"
     if np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
@@ -763,6 +774,7 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if np.isfinite(fuel_gas_d) and np.isfinite(steam_d):
         if fuel_gas_d >= 20 and steam_d <= -3:
             return "Fault"
+
     if np.isfinite(fw_tank_now) and fw_tank_now <= 0.35:
         return "Fault"
     if np.isfinite(boiler_water_now) and boiler_water_now <= 0.35:
@@ -773,6 +785,7 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if np.isfinite(fw_tank_d) and np.isfinite(boiler_water_d):
         if fw_tank_d <= -0.20 and boiler_water_d <= -0.08:
             return "Fault"
+
     if np.isfinite(boiler_water_now) and np.isfinite(steam_now):
         if boiler_water_now >= 0.80 and steam_now <= 85:
             return "Fault"
@@ -1093,6 +1106,7 @@ if predict_btn:
             fixes = suggest_fix(machine, fault_type_pred)
 
         st.success("Prediction completed.")
+        st.markdown('<div id="prediction-results"></div>', unsafe_allow_html=True)
 
         st.write("")
         k1, k2, k3 = st.columns(3, gap="large")
@@ -1149,6 +1163,21 @@ if predict_btn:
         st.subheader("📋 Tabular Model Input Used")
         st.dataframe(X, use_container_width=True)
         st.markdown("</div>", unsafe_allow_html=True)
+
+        components.html(
+            """
+            <script>
+                const scrollToResults = () => {
+                    const el = window.parent.document.getElementById("prediction-results");
+                    if (el) {
+                        el.scrollIntoView({ behavior: "smooth", block: "start" });
+                    }
+                };
+                setTimeout(scrollToResults, 300);
+            </script>
+            """,
+            height=0,
+        )
 
     except Exception as e:
         st.error(f"Prediction failed: {e}")
