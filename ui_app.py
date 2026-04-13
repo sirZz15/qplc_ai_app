@@ -181,6 +181,10 @@ def get_field_unit(machine: str, field: str) -> str:
     name = normalize_col_name(field)
 
     if machine == "boiler":
+        if "BOILER WATER" in name:
+            return "decimal %"
+        if "FEED WATER TANK" in name:
+            return "decimal %"
         if "MAIN STEAM PRESSURE" in name or "MAIN STREAM PRESSURE" in name:
             return "bar"
         if "FUEL PRESSURE" in name:
@@ -191,18 +195,16 @@ def get_field_unit(machine: str, field: str) -> str:
             return "°C"
         if "OPERATING HOURS" in name:
             return "hr"
-        if "BOILER WATER" in name or "FEED WATER TANK" in name or name == "WATER":
-            return "level"
 
     if machine == "genset":
+        if "POWER FACTOR" in name or name == "PF":
+            return ""
         if "VOLTAGE" in name:
             return "V"
         if "CURRENT" in name:
             return "A"
         if "LOAD" in name:
             return "kW"
-        if "POWER FACTOR" in name:
-            return "pf"
         if "OIL PRESSURE" in name:
             return "psi"
         if "COOLANT TEMPERATURE" in name or "ENGINE TEMPERATURE" in name or "TEMP" in name:
@@ -226,6 +228,8 @@ def get_field_unit(machine: str, field: str) -> str:
         if name == "HOURS" or "OPERATING HOURS" in name:
             return "hr"
 
+    if "POWER FACTOR" in name or name == "PF":
+        return ""
     if "TEMPERATURE" in name or "TEMP" in name:
         return "°C"
     if "PRESSURE" in name:
@@ -590,15 +594,7 @@ def _safe_float(v: Any) -> float:
         return 0.0
 
 
-# =========================================================
-# Genset second-layer rule-based machine condition
-# =========================================================
 def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
-    """
-    Second-layer genset fault/normal rule.
-    Only used when ML predicts NORMAL for genset.
-    REMARKS is intentionally not used.
-    """
     if row_dict is None:
         return "Normal"
 
@@ -682,15 +678,7 @@ def infer_genset_fault_flag_rules_ui(row_dict: Dict[str, Any]) -> str:
     return "Normal"
 
 
-# =========================================================
-# Boiler second-layer rule-based machine condition
-# =========================================================
 def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
-    """
-    Second-layer boiler fault/normal rule.
-    Uses the 3 input rows.
-    Only used when ML predicts NORMAL for boiler.
-    """
     if not history_rows:
         return "Normal"
 
@@ -750,12 +738,10 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
 
     if np.isfinite(oph_now) and oph_now <= 0.5:
         return "Fault"
-
     if np.isfinite(steam_now) and steam_now <= 80:
         return "Fault"
     if np.isfinite(steam_d) and steam_d <= -12:
         return "Fault"
-
     if np.isfinite(fuel_press_now) and fuel_press_now <= 0.65:
         return "Fault"
     if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
@@ -764,13 +750,11 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if np.isfinite(fuel_press_d) and np.isfinite(steam_d):
         if fuel_press_d <= -0.25 and steam_d <= -8:
             return "Fault"
-
     if np.isfinite(fuel_press_now) and fuel_press_now >= 1.50:
         return "Fault"
     if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now):
         if fuel_press_now >= 1.30 and fuel_gas_now >= 220:
             return "Fault"
-
     if np.isfinite(fuel_gas_now) and fuel_gas_now >= 235:
         return "Fault"
     if np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
@@ -779,7 +763,6 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if np.isfinite(fuel_gas_d) and np.isfinite(steam_d):
         if fuel_gas_d >= 20 and steam_d <= -3:
             return "Fault"
-
     if np.isfinite(fw_tank_now) and fw_tank_now <= 0.35:
         return "Fault"
     if np.isfinite(boiler_water_now) and boiler_water_now <= 0.35:
@@ -790,7 +773,6 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     if np.isfinite(fw_tank_d) and np.isfinite(boiler_water_d):
         if fw_tank_d <= -0.20 and boiler_water_d <= -0.08:
             return "Fault"
-
     if np.isfinite(boiler_water_now) and np.isfinite(steam_now):
         if boiler_water_now >= 0.80 and steam_now <= 85:
             return "Fault"
@@ -1065,9 +1047,6 @@ if predict_btn:
             if machine in {"boiler", "pellet"}:
                 horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
 
-            # =========================================================
-            # Final machine condition logic
-            # =========================================================
             final_fault_flag = ff_pred_ml
 
             if machine == "genset":
