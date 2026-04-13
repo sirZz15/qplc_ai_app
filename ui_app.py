@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from pathlib import Path
 from typing import Dict, Any, List, Optional
 
 import numpy as np
@@ -457,6 +458,29 @@ def get_default_input_value(df_ref: pd.DataFrame, field: str, numeric: bool = Fa
         return str(mode_vals.iloc[0])
 
     return str(s.iloc[0])
+
+
+def show_machine_image_in_sidebar(machine: str):
+    base_dir = Path(__file__).resolve().parent
+
+    image_map = {
+        "boiler": "boiler.png",
+        "genset": "genset.jpg",
+        "pellet": "pellet.jpg",
+    }
+
+    image_name = image_map.get(machine)
+    if not image_name:
+        return
+
+    img_path = base_dir / image_name
+    if img_path.exists():
+        st.sidebar.markdown("---")
+        st.sidebar.image(
+            str(img_path),
+            caption=f"{machine.upper()} Machine",
+            use_container_width=True
+        )
 
 
 def build_grouped_input_form(
@@ -961,6 +985,8 @@ machine = st.sidebar.selectbox(
     ["boiler", "genset", "pellet"],
     format_func=lambda x: x.upper(),
 )
+
+show_machine_image_in_sidebar(machine)
 
 bundle = load_bundle(machine)
 if not bundle:
