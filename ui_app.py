@@ -177,6 +177,81 @@ def is_dropdown_column(machine: str, col_name: str) -> bool:
     return False
 
 
+def get_field_unit(machine: str, field: str) -> str:
+    name = normalize_col_name(field)
+
+    if machine == "boiler":
+        if "MAIN STEAM PRESSURE" in name or "MAIN STREAM PRESSURE" in name:
+            return "bar"
+        if "FUEL PRESSURE" in name:
+            return "bar"
+        if "FUEL GAS" in name:
+            return "°C"
+        if "FEED WATER TEMP" in name or "WATER TEMP" in name:
+            return "°C"
+        if "OPERATING HOURS" in name:
+            return "hr"
+        if "BOILER WATER" in name or "FEED WATER TANK" in name or name == "WATER":
+            return "level"
+
+    if machine == "genset":
+        if "VOLTAGE" in name:
+            return "V"
+        if "CURRENT" in name:
+            return "A"
+        if "LOAD" in name:
+            return "kW"
+        if "POWER FACTOR" in name:
+            return "pf"
+        if "OIL PRESSURE" in name:
+            return "psi"
+        if "COOLANT TEMPERATURE" in name or "ENGINE TEMPERATURE" in name or "TEMP" in name:
+            return "°C"
+        if "FREQUENCY" in name:
+            return "Hz"
+        if "SPEED" in name:
+            return "rpm"
+        if "OPERATING HOURS" in name:
+            return "hr"
+
+    if machine == "pellet":
+        if "AMP1" in name or "AMP2" in name or "MOTOR" in name:
+            return "A"
+        if "US PRESS" in name or "DS PRESS" in name:
+            return "bar"
+        if "FEEDER RATE" in name:
+            return "%"
+        if "TEMPERATURE" in name:
+            return "°C"
+        if name == "HOURS" or "OPERATING HOURS" in name:
+            return "hr"
+
+    if "TEMPERATURE" in name or "TEMP" in name:
+        return "°C"
+    if "PRESSURE" in name:
+        return "bar"
+    if "CURRENT" in name or "AMP" in name:
+        return "A"
+    if "VOLTAGE" in name:
+        return "V"
+    if "FREQUENCY" in name or "HZ" in name:
+        return "Hz"
+    if "LOAD" in name:
+        return "kW"
+    if "SPEED" in name or "RPM" in name:
+        return "rpm"
+    if "HOURS" in name:
+        return "hr"
+
+    return ""
+
+
+def format_input_label(machine: str, field: str) -> str:
+    base = clean_display_label(field)
+    unit = get_field_unit(machine, field)
+    return f"{base} ({unit})" if unit else base
+
+
 def badge_class(condition: str) -> str:
     if condition == "Normal":
         return "badge badge-ok"
@@ -419,7 +494,7 @@ def build_grouped_input_form(
                 for i, field in enumerate(group_fields):
                     target_col = c1 if i % 2 == 0 else c2
                     with target_col:
-                        display_label = clean_display_label(field)
+                        display_label = format_input_label(machine, field)
 
                         if is_dropdown_column(machine, field):
                             options = get_dropdown_options(df_ref, field)
@@ -444,7 +519,7 @@ def build_grouped_input_form(
                                 label=display_label,
                                 value=float(default_val),
                                 step=0.01,
-                                format="%.4f",
+                                format="%.2f",
                                 key=f"{machine}_{row_idx}_{field}",
                             )
                             row_inputs[field] = val
@@ -673,17 +748,14 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
     boiler_water_d = delta(boiler_water_s)
     fw_tank_d = delta(fw_tank_s)
 
-    # Sudden E-Stop
     if np.isfinite(oph_now) and oph_now <= 0.5:
         return "Fault"
 
-    # Main Steam Line Leak
     if np.isfinite(steam_now) and steam_now <= 80:
         return "Fault"
     if np.isfinite(steam_d) and steam_d <= -12:
         return "Fault"
 
-    # Burner Trip / Fuel Pump Fail
     if np.isfinite(fuel_press_now) and fuel_press_now <= 0.65:
         return "Fault"
     if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
@@ -693,14 +765,12 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
         if fuel_press_d <= -0.25 and steam_d <= -8:
             return "Fault"
 
-    # Burner Nozzle Fault
     if np.isfinite(fuel_press_now) and fuel_press_now >= 1.50:
         return "Fault"
     if np.isfinite(fuel_press_now) and np.isfinite(fuel_gas_now):
         if fuel_press_now >= 1.30 and fuel_gas_now >= 220:
             return "Fault"
 
-    # High Flue Gas Temp / Tube Scaling
     if np.isfinite(fuel_gas_now) and fuel_gas_now >= 235:
         return "Fault"
     if np.isfinite(fuel_gas_now) and np.isfinite(steam_now):
@@ -710,7 +780,6 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
         if fuel_gas_d >= 20 and steam_d <= -3:
             return "Fault"
 
-    # Low Water / Makeup Valve Stuck
     if np.isfinite(fw_tank_now) and fw_tank_now <= 0.35:
         return "Fault"
     if np.isfinite(boiler_water_now) and boiler_water_now <= 0.35:
@@ -722,7 +791,6 @@ def infer_boiler_fault_flag_rules_ui(history_rows: List[Dict[str, Any]]) -> str:
         if fw_tank_d <= -0.20 and boiler_water_d <= -0.08:
             return "Fault"
 
-    # Level Controller Malfunction
     if np.isfinite(boiler_water_now) and np.isfinite(steam_now):
         if boiler_water_now >= 0.80 and steam_now <= 85:
             return "Fault"
@@ -984,65 +1052,68 @@ st.markdown("</div>", unsafe_allow_html=True)
 # =========================================================
 if predict_btn:
     try:
-        X = build_history_input_frame(machine, input_rows, bundle)
+        with st.spinner("Predicting machine status, please wait..."):
+            X = build_history_input_frame(machine, input_rows, bundle)
 
-        ff_name, ff_pipe = get_best_pipe(bundle, "fault_flag")
-        ff_pred_ml = str(ff_pipe.predict(X)[0]).strip()
+            ff_name, ff_pipe = get_best_pipe(bundle, "fault_flag")
+            ff_pred_ml = str(ff_pipe.predict(X)[0]).strip()
 
-        horizon_pred = None
-        horizon_conf = None
-        horizon_model_name = "N/A"
+            horizon_pred = None
+            horizon_conf = None
+            horizon_model_name = "N/A"
 
-        if machine in {"boiler", "pellet"}:
-            horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
+            if machine in {"boiler", "pellet"}:
+                horizon_pred, horizon_conf, horizon_model_name = predict_fault_horizon(machine, input_rows)
 
-        # =========================================================
-        # Final machine condition logic
-        # =========================================================
-        final_fault_flag = ff_pred_ml
+            # =========================================================
+            # Final machine condition logic
+            # =========================================================
+            final_fault_flag = ff_pred_ml
 
-        if machine == "genset":
-            if str(ff_pred_ml).strip().lower() == "fault":
-                final_fault_flag = "Fault"
-            else:
-                final_fault_flag = infer_genset_fault_flag_rules_ui(input_rows[-1])
-
-        elif machine == "boiler":
-            if str(ff_pred_ml).strip().lower() == "fault":
-                final_fault_flag = "Fault"
-            else:
-                final_fault_flag = infer_boiler_fault_flag_rules_ui(input_rows)
-
-        machine_condition = "Fault" if str(final_fault_flag).strip().lower() == "fault" else "Normal"
-        final_horizon = final_fault_horizon(final_fault_flag, horizon_pred)
-        horizon_instruction = get_horizon_instruction(final_horizon)
-
-        fault_type_pred = "N/A"
-        fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "ML / Rule Fallback"
-
-        if machine_condition != "Normal":
-            if machine == "boiler":
-                ft = infer_boiler_fault_type_rules(input_rows)
-                fault_type_pred = ft if ft else "N/A"
-
-            elif machine == "genset":
-                ft = infer_genset_fault_type_rules(input_rows[-1])
-                fault_type_pred = ft if ft else "N/A"
-
-            elif machine == "pellet":
-                rule_ft = infer_pellet_fault_type_rules(input_rows)
-                if bundle["fault_type"]["pipelines"] and bundle["fault_type"]["best_model"]:
-                    best_ft = bundle["fault_type"]["best_model"]
-                    ft_pipe = bundle["fault_type"]["pipelines"][best_ft]
-                    fault_type_model_name = f"{best_ft} + rule fallback"
-                    fault_type_pred = str(ft_pipe.predict(X)[0])
-                    if not fault_type_pred or fault_type_pred in {"Normal", "N/A"}:
-                        fault_type_pred = rule_ft if rule_ft else "N/A"
+            if machine == "genset":
+                if str(ff_pred_ml).strip().lower() == "fault":
+                    final_fault_flag = "Fault"
                 else:
-                    fault_type_model_name = "Rule-based"
-                    fault_type_pred = rule_ft if rule_ft else "N/A"
+                    final_fault_flag = infer_genset_fault_flag_rules_ui(input_rows[-1])
 
-        fixes = suggest_fix(machine, fault_type_pred)
+            elif machine == "boiler":
+                if str(ff_pred_ml).strip().lower() == "fault":
+                    final_fault_flag = "Fault"
+                else:
+                    final_fault_flag = infer_boiler_fault_flag_rules_ui(input_rows)
+
+            machine_condition = "Fault" if str(final_fault_flag).strip().lower() == "fault" else "Normal"
+            final_horizon = final_fault_horizon(final_fault_flag, horizon_pred)
+            horizon_instruction = get_horizon_instruction(final_horizon)
+
+            fault_type_pred = "N/A"
+            fault_type_model_name = "Rule-based" if cfg["fault_type_mode"] == "rule_based" else "ML / Rule Fallback"
+
+            if machine_condition != "Normal":
+                if machine == "boiler":
+                    ft = infer_boiler_fault_type_rules(input_rows)
+                    fault_type_pred = ft if ft else "N/A"
+
+                elif machine == "genset":
+                    ft = infer_genset_fault_type_rules(input_rows[-1])
+                    fault_type_pred = ft if ft else "N/A"
+
+                elif machine == "pellet":
+                    rule_ft = infer_pellet_fault_type_rules(input_rows)
+                    if bundle["fault_type"]["pipelines"] and bundle["fault_type"]["best_model"]:
+                        best_ft = bundle["fault_type"]["best_model"]
+                        ft_pipe = bundle["fault_type"]["pipelines"][best_ft]
+                        fault_type_model_name = f"{best_ft} + rule fallback"
+                        fault_type_pred = str(ft_pipe.predict(X)[0])
+                        if not fault_type_pred or fault_type_pred in {"Normal", "N/A"}:
+                            fault_type_pred = rule_ft if rule_ft else "N/A"
+                    else:
+                        fault_type_model_name = "Rule-based"
+                        fault_type_pred = rule_ft if rule_ft else "N/A"
+
+            fixes = suggest_fix(machine, fault_type_pred)
+
+        st.success("Prediction completed.")
 
         st.write("")
         k1, k2, k3 = st.columns(3, gap="large")
