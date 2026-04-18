@@ -418,7 +418,11 @@ def get_dropdown_options(df_ref: pd.DataFrame, field: str) -> List[str]:
         .dropna()
         .astype(str)
         .str.strip()
+        # 🔥 REMOVE RANGE IN PARENTHESES
+        .apply(lambda x: re.sub(r"\s*\(.*?\)", "", x))
+        .str.strip()
     )
+
     vals = vals[vals != ""].unique().tolist()
     vals = sorted(vals)
 
@@ -448,7 +452,12 @@ def get_default_input_value(df_ref: pd.DataFrame, field: str, numeric: bool = Fa
 
         return float(s.median())
 
-    s = series.astype(str).str.strip()
+    s = (
+    series.astype(str)
+    .str.strip()
+    .apply(lambda x: re.sub(r"\s*\(.*?\)", "", x))
+    .str.strip()
+)
     s = s[s != ""]
     if s.empty:
         return ""
